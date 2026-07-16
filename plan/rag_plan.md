@@ -139,7 +139,7 @@ Distilled from the codebase-exploration summary. Each step maps to the stage tha
 Before any flow step works, the shared scaffolding must exist. This is `PLAN.md` §1.1–§1.2 and is treated as a prerequisite, not re-planned here:
 
 - Spring Boot 4 / Java 21 project, Maven wrapper, profiles (`local`/`dev`/`prod`).
-- Flyway-owned schema: `tenants`, `api_keys`, `model_configs`, `knowledge_bases`, `documents`, `chunks` (pgvector column), `ingestion_jobs` — full column-level definitions and DDL in **Stage 0.5** below.
+- Hibernate-`ddl-auto`-owned schema, generated from JPA `@Entity` classes: `tenants`, `api_keys`, `model_configs`, `knowledge_bases`, `documents`, `chunks` (pgvector column), `ingestion_jobs` — full column-level definitions in **Stage 0.5** below.
 - Multi-tenancy: **shared schema + `tenant_id` column + enforced filtering**; `tenant_id` on every tenant-scoped table with a composite index.
 - API-key auth filter (SHA-256 at rest) → request-scoped `TenantContext`.
 - **`TenantContext` + correlation-ID propagation into `@Async` executors** via `TaskDecorator` — the single easiest-to-miss, highest-blast-radius piece; keep its guardrail tests.
@@ -152,15 +152,15 @@ Before any flow step works, the shared scaffolding must exist. This is `PLAN.md`
 
 > **No Docker anywhere in the RAG app.** Local dev **and** the test suite run on **natively installed PostgreSQL 17 + pgvector + Redis** — never Docker, Docker Compose, Podman, or Testcontainers (matches `PLAN.md` §3 / §9 decisions). No container runtime is a dependency for building, running, or testing this app. Services are started natively (`brew services start …` or `scripts/setup-environment.sh` / `.ps1`); integration tests hit an isolated native `synapsemcp_test` database + Redis index 1, not an ephemeral container. Production containerization is a separate, out-of-scope Phase 3 concern and must not leak into this plan.
 
-### Hard Rule — The App Must Start with No DB/Schema Present
+### Startup Behavior — Bootstrap, Then Standard Fail-Fast
 
-> The Spring Boot process comes up (HTTP listener live, `/actuator/health` responding) even if Postgres is unreachable, the `synapsemcp` database doesn't exist yet, or migrations haven't run. This is a deliberate departure from Spring Boot's default fail-fast datasource/Flyway behavior and needs explicit design:
+> **✅ Decision (`plan.md` §9, 2026-07-16 — supersedes the earlier zero-DB-startup design):** The app does **not** attempt to stay up with no DB/schema present. It runs a bootstrap step (below) to provision what it can automatically, then follows standard Spring Boot fail-fast behavior for everything else: if Postgres is unreachable, or bootstrap/`ddl-auto`/ANN-index setup fails, the application **does not finish starting**. This deliberately drops the previous design (HTTP listener up even with zero DB present, custom non-blocking datasource config, a `SchemaReadinessHealthIndicator` distinct from liveness, self-healing retry loop) — that design existed specifically because Flyway ran decoupled from Spring context startup, in a separately-scheduled retrying runner. Hibernate's `ddl-auto` has no equivalent decoupled/retryable execution model without significant extra engineering (e.g. lazy JPA initialization); standard fail-fast was chosen deliberately over rebuilding that resilience layer.
 >
-> - **Non-blocking connection pool.** HikariCP configured with `initialization-fail-timeout: -1` (or `0`) so pool creation never throws at context-startup even if Postgres refuses the connection — the pool is created lazily and simply retries on first real use.
-> - **Flyway does not run automatically on the default startup path.** `spring.flyway.enabled: false`; migrations are instead triggered by the self-bootstrapping runner (Stage 0.5) which retries independently of the main application context startup, so a slow/absent DB never blocks the app from listening.
-> - **Readiness vs. liveness are distinct.** `/actuator/health/liveness` reflects only "the JVM/HTTP server is up" (always green once boot completes); a custom `SchemaReadinessHealthIndicator` feeds `/actuator/health/readiness` and is `DOWN` until bootstrap+migration have succeeded at least once. Load balancers/orchestrators should gate traffic on readiness, not liveness.
-> - **DB-dependent endpoints fail gracefully, not the app.** Any request touching a repository before schema is ready returns a clear `503` (RFC 7807 problem-detail, "database not ready yet") rather than a stack trace or a hung connection-pool wait.
-> - **This does not weaken tenant isolation or Flyway-as-source-of-truth** — `ddl-auto: validate` still applies once schema exists; the only change is *when* and *how* migrations are triggered, not what they do.
+> - **Bootstrap runs early, ahead of the app's own `DataSource`/`EntityManagerFactory` beans.** `DatabaseBootstrapRunner` (`local`/`dev` only — see Stage 0.5) opens a plain JDBC connection to Postgres's `postgres` maintenance database and idempotently creates the `synapsemcp` role/database and enables the `vector` extension, before Spring's normal JPA autoconfiguration proceeds.
+> - **Then standard JPA/Hibernate startup takes over.** HikariCP connects normally; Hibernate `ddl-auto` (`update`/`create-drop`/`validate` per profile, Stage 0.5) creates/validates tables from the `@Entity` classes as part of ordinary `EntityManagerFactory` bootstrap. If this fails, the app fails to start — no custom recovery path.
+> - **ANN indexes/`CHECK` constraints are added right after, still during startup.** `AnnIndexBootstrapRunner` runs once Hibernate's schema step completes, executing the raw SQL `ddl-auto` can't express (HNSW indexes, `CHECK` constraints) via idempotent `IF NOT EXISTS`/catch-and-ignore statements — cheap on every run, not just the first.
+> - **Health/readiness is standard Actuator.** No custom readiness/liveness split — `/actuator/health` reflects real DB connectivity via the standard Spring Boot `DataSource` health indicator, since by the time the app is accepting traffic, the DB is already known to be reachable and schema-ready.
+> - **This does not weaken tenant isolation** — unchanged from before, enforced at the application layer regardless of how the schema was created.
 
 ### Package Structure
 
@@ -175,127 +175,56 @@ The application must strictly follow this organization. **All** RAG-related code
 
 # Stage 0.5 — Data Model / Schema (Finalized)
 
-The authoritative, finalized table definitions for the RAG app. **Flyway-owned schema only** — `ddl-auto: validate` in every profile (Hibernate never mutates the schema; every change is a new versioned migration). PostgreSQL 17+, `vector` extension enabled in `V2`. Every table uses `UUID PRIMARY KEY DEFAULT gen_random_uuid()`.
+The authoritative, finalized table definitions for the RAG app. **Hibernate-`ddl-auto`-owned schema**, generated from JPA `@Entity` classes — no Flyway, no migration files. PostgreSQL 17+, `vector` extension enabled by the startup bootstrap runner (below) before JPA initializes. Every table uses a `UUID` primary key generated in Java via `@GeneratedValue(strategy = GenerationType.UUID)` (Hibernate assigns the UUID client-side; no Postgres-side `gen_random_uuid()` default is needed, since `ddl-auto` doesn't emit custom column defaults from plain JPA annotations).
 
-## Self-Executing Bootstrap
+## Startup Bootstrap (Role, Database, Extension, ANN Indexes)
 
-Because the app must start with **no DB or schema present** (Stage 0's hard rule), schema creation can't be a one-time developer step or a blocking part of `main()` — it has to be a component the app runs and retries itself, entirely separate from the normal request-serving path.
+Hibernate's `ddl-auto` only manages tables/columns/basic constraints **inside an already-existing, already-connected database** — it cannot create the Postgres role, the database itself, or run `CREATE EXTENSION`, and it cannot express pgvector's HNSW index syntax or `CHECK` constraints from plain JPA annotations. Two small dedicated runners fill those gaps, both run automatically at app startup with no manual step:
 
-**Why this needs two connections, not one.** The app's own JPA/Flyway datasource connects *to* the `synapsemcp` database — but that database might not exist yet, so that connection can't be what creates it. A `CREATE DATABASE` statement also can't run inside a transaction/migration once connected to the target DB. So bootstrap is split into two steps against two different targets:
+**Why database/role creation needs a separate connection.** The app's own JPA datasource connects *to* the `synapsemcp` database — but that database might not exist yet, so that connection can't be what creates it. A `CREATE DATABASE` statement also can't run inside the same session as normal schema DDL once connected to the target DB.
 
-1. **`DatabaseBootstrapRunner`** (`com.synapsemcp.config`, a `Runnable` on a `@Scheduled` retry — *not* an `ApplicationRunner` that blocks startup): opens a **plain JDBC connection** (not the app's pooled datasource) to Postgres's `postgres` maintenance database using bootstrap credentials, and idempotently:
+1. **`DatabaseBootstrapRunner`** (`com.synapsemcp.config`) — runs first, before the app's own `DataSource`/`EntityManagerFactory` beans are created. Opens a **plain JDBC connection** (not the app's pooled datasource) to Postgres's `postgres` maintenance database using bootstrap credentials, and idempotently:
    - `CREATE ROLE synapsemcp WITH LOGIN PASSWORD '...'` — catches/ignores the "role already exists" error (Postgres has no `CREATE ROLE IF NOT EXISTS`)
    - `CREATE DATABASE synapsemcp OWNER synapsemcp` — same idempotent catch on "database already exists"
-   - Reconnects to the now-guaranteed-to-exist `synapsemcp` database and runs `CREATE EXTENSION IF NOT EXISTS vector` (this one *does* support `IF NOT EXISTS` directly)
-2. **Flyway migration**, triggered immediately after step 1 succeeds, against the app's normal datasource — runs `V1__init_schema.sql` (below) to create all seven tables.
-3. On success, an internal `schemaReady` flag flips to `true`, which is what `SchemaReadinessHealthIndicator` (Stage 0) reports.
+   - Reconnects to the now-guaranteed-to-exist `synapsemcp` database and runs `CREATE EXTENSION IF NOT EXISTS vector`
+2. **Standard Spring JPA autoconfiguration proceeds** once step 1 succeeds: HikariCP connects to the app's normal datasource, and Hibernate `ddl-auto` (per-profile value below) creates/validates all tables from the `@Entity` classes as part of ordinary `EntityManagerFactory` bootstrap.
+3. **`AnnIndexBootstrapRunner`** (`com.synapsemcp.config`, an `ApplicationRunner` that runs after the `EntityManagerFactory` bean is ready) executes the raw SQL `ddl-auto` can't express: the six `CREATE INDEX IF NOT EXISTS idx_chunks_emb_* ... USING hnsw (embedding_* vector_cosine_ops)` statements, plus the `CHECK` constraints on `documents.status`/`ingestion_jobs.status`/`model_configs.chat_provider`/`model_configs.embedding_provider`. Runs unconditionally on **every** startup — each statement is idempotent (`IF NOT EXISTS` / catch-and-ignore), so after the first real run it's a fast no-op; this also means the app self-heals if an index or constraint is ever manually dropped.
 
-**Retry behavior:** if Postgres itself is unreachable (not just "database missing"), step 1 logs a warning and reschedules (e.g. every 10s, capped backoff) rather than throwing — this is what lets the app boot and stay up indefinitely with zero DB present, then self-heal the moment Postgres becomes reachable, with no restart and no manual migration command.
+If Postgres is unreachable, or any of these three steps fails, the app fails to start — standard Spring Boot fail-fast, no retry loop (Stage 0).
 
-> **✅ Decision (Grooming #18 — Bootstrap credentials):** `DatabaseBootstrapRunner` reuses the **local-dev SUPERUSER role** for `CREATE ROLE`/`CREATE DATABASE`-capable credentials. This bootstrap behavior is **`local`/`dev`-profile-only**. In `prod`, schema creation reverts to a manual one-time step, and the self-execution behavior is disabled. No separate bootstrap-only credential is needed.
+### `ddl-auto` by Profile
 
-## Migration File (`V1__init_schema.sql` — Authoritative Copy)
+| Profile | `spring.jpa.hibernate.ddl-auto` | Rationale |
+|---|---|---|
+| `local` | `update` | Fast dev iteration; schema evolves automatically as `@Entity` classes change |
+| `dev` | `update` | Same as `local` — shared dev convenience |
+| `test` | `create-drop` | Every `*IntegrationTest` run gets a genuinely fresh schema — consistent with this project's existing destructive-reset testing philosophy (`plan.md` §9, 2026-07-14 isolated-test-database entry) |
+| `prod` | `validate` | Hibernate never auto-mutates a production schema; it must already match the entity mapping via a controlled, manual step |
 
-Lives at `src/main/resources/db/migration/V1__init_schema.sql` — a single consolidated migration (if merging into an existing codebase's `V1`–`V6` history from `PLAN.md`, renumber to the next free version):
+> **✅ Decision (Grooming #18 — Bootstrap credentials):** `DatabaseBootstrapRunner` reuses the **local-dev SUPERUSER role** for `CREATE ROLE`/`CREATE DATABASE`-capable credentials. Both bootstrap runners (`DatabaseBootstrapRunner`, `AnnIndexBootstrapRunner`) are **`local`/`dev`-profile-only**. In `prod`, role/database/extension provisioning reverts to the manual one-time step in `plan.md` §3, `ddl-auto` is `validate` (schema must already exist and match), and ANN indexes/constraints must already be in place before deploy. No separate bootstrap-only credential is needed.
 
-```sql
--- V1__init_schema.sql
-CREATE EXTENSION IF NOT EXISTS vector;
+## Schema Realization — `ddl-auto` vs. the ANN Bootstrap Supplement
 
-CREATE TABLE tenants (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+There is no standalone migration file. The tables below (full detail in *Table Definitions (Reference)* further down) are realized as JPA `@Entity` classes in each domain package (`plan.md` §4 Code conventions), and Hibernate `ddl-auto` generates the actual DDL from those classes at startup. Most of the schema maps directly onto standard JPA/Hibernate annotations:
 
-CREATE TABLE api_keys (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id),
-  key_hash TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX idx_api_keys_key_hash ON api_keys (key_hash);
-CREATE INDEX idx_api_keys_tenant_id ON api_keys (tenant_id);
+| Schema feature | JPA/Hibernate mechanism |
+|---|---|
+| `UUID PRIMARY KEY` | `@Id @GeneratedValue(strategy = GenerationType.UUID)` |
+| `NOT NULL` | `@Column(nullable = false)` (the default for primitive/non-null-annotated fields) |
+| `UNIQUE` (single or composite) | `@Column(unique = true)` or `@Table(uniqueConstraints = @UniqueConstraint(columnNames = {...}))` |
+| `FOREIGN KEY ... REFERENCES` | `@ManyToOne`/`@JoinColumn` |
+| `ON DELETE CASCADE` | `@OnDelete(action = OnDeleteAction.CASCADE)` (Hibernate-specific, alongside `@ManyToOne`) |
+| Plain composite index (e.g. `idx_documents_tenant_kb`) | `@Table(indexes = @Index(columnList = "tenant_id, knowledge_base_id"))` |
+| `TIMESTAMPTZ ... DEFAULT now()` | `@CreationTimestamp` (Hibernate sets the value client-side on insert; behaviorally equivalent) |
+| `JSONB` (`chunks.metadata`) | `@JdbcTypeCode(SqlTypes.JSON)` on a `Map`/`JsonNode`-typed field |
+| `TEXT` (unbounded, e.g. `chunks.content`, `ingestion_jobs.error_detail`) | `@Column(columnDefinition = "TEXT")` — Hibernate's implicit default for an unannotated `String` field is `varchar(255)`, which silently truncates; every long-text column needs this explicit annotation |
+| `chunks.embedding_*` (`vector(N)`) | `org.hibernate.orm:hibernate-vector`'s `SqlTypes.VECTOR` type on a `float[]` field, **without** `@Array(length=N)` (would force a fixed dimension incompatible with the sparse-column design) |
 
-CREATE TABLE model_configs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id UUID NOT NULL UNIQUE REFERENCES tenants(id),
-  chat_provider TEXT NOT NULL CHECK (chat_provider IN ('openai', 'anthropic', 'ollama', 'google-genai')),
-  chat_model TEXT NOT NULL,
-  embedding_provider TEXT NOT NULL CHECK (embedding_provider IN ('openai', 'ollama', 'google-genai')),
-  embedding_model TEXT NOT NULL,
-  provider_credentials TEXT,   -- JSON: {"chatApiKey": "", "embeddingApiKey": ""}, Base64-encoded (see Stage 2)
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+**What `ddl-auto` cannot express — handled by `AnnIndexBootstrapRunner` instead (Stage 0.5 above):**
 
-CREATE TABLE knowledge_bases (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id),
-  name TEXT NOT NULL,
-  embedding_dim INT NOT NULL,
-  UNIQUE (tenant_id, name)
-);
-
-CREATE TABLE knowledge_base_model_configs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  knowledge_base_id UUID NOT NULL UNIQUE REFERENCES knowledge_bases(id) ON DELETE CASCADE,
-  chat_provider TEXT NOT NULL,
-  chat_model TEXT NOT NULL,
-  embedding_provider TEXT NOT NULL,
-  embedding_model TEXT NOT NULL,
-  provider_credentials TEXT,   -- Base64-encoded, synced from model_configs (see Stage 2 Grooming #22)
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE documents (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id UUID NOT NULL,
-  knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
-  filename TEXT NOT NULL,
-  file_type TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('PENDING', 'INDEXING', 'READY', 'FAILED')),
-  content_hash TEXT NOT NULL,
-  extractor_name TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_documents_tenant_kb ON documents (tenant_id, knowledge_base_id);
-CREATE UNIQUE INDEX idx_documents_tenant_kb_content_hash
-  ON documents (tenant_id, knowledge_base_id, content_hash);
-
-CREATE TABLE chunks (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id UUID NOT NULL,
-  document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-  chunk_index INT NOT NULL,
-  content TEXT NOT NULL,
-  embedding_384 vector(384),
-  embedding_512 vector(512),
-  embedding_768 vector(768),
-  embedding_1024 vector(1024),
-  embedding_1536 vector(1536),
-  embedding_3072 vector(3072),
-  metadata JSONB NOT NULL DEFAULT '{}'
-);
-CREATE INDEX idx_chunks_tenant_doc ON chunks (tenant_id, document_id);
-CREATE INDEX idx_chunks_emb_384 ON chunks USING hnsw (embedding_384 vector_cosine_ops);
-CREATE INDEX idx_chunks_emb_512 ON chunks USING hnsw (embedding_512 vector_cosine_ops);
-CREATE INDEX idx_chunks_emb_768 ON chunks USING hnsw (embedding_768 vector_cosine_ops);
-CREATE INDEX idx_chunks_emb_1024 ON chunks USING hnsw (embedding_1024 vector_cosine_ops);
-CREATE INDEX idx_chunks_emb_1536 ON chunks USING hnsw (embedding_1536 vector_cosine_ops);
-CREATE INDEX idx_chunks_emb_3072 ON chunks USING hnsw (embedding_3072 vector_cosine_ops);
-
-CREATE TABLE ingestion_jobs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id UUID NOT NULL,
-  document_id UUID NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
-  status TEXT NOT NULL CHECK (status IN ('PENDING', 'INDEXING', 'READY', 'FAILED')),
-  stage TEXT,
-  error_detail TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_ingestion_jobs_tenant_doc ON ingestion_jobs (tenant_id, document_id);
-```
+- The six HNSW ANN indexes on `chunks`' sparse embedding columns: `CREATE INDEX IF NOT EXISTS idx_chunks_emb_384 ON chunks USING hnsw (embedding_384 vector_cosine_ops)` (and the same for `512`/`768`/`1024`/`1536`/`3072`) — plain `@Index` only supports ordinary B-tree-style column lists, not pgvector's `USING hnsw ... vector_cosine_ops` syntax.
+- `CHECK` constraints: `model_configs.chat_provider IN ('openai','anthropic','ollama','google-genai')`, `model_configs.embedding_provider IN ('openai','ollama','google-genai')`, `documents.status IN ('PENDING','INDEXING','READY','FAILED')`, `ingestion_jobs.status IN (...)` (same four values) — standard JPA has no `CHECK` constraint annotation; these are added as raw `ALTER TABLE ... ADD CONSTRAINT ... CHECK (...)` statements, each guarded by a catch-and-ignore on "constraint already exists" for idempotency.
+- `vector` extension enablement itself — handled by `DatabaseBootstrapRunner`, not `ddl-auto` (Stage 0.5 above).
 
 ## Table Definitions (Reference)
 
@@ -303,7 +232,7 @@ CREATE INDEX idx_ingestion_jobs_tenant_doc ON ingestion_jobs (tenant_id, documen
 
 | Column | Type | Constraints |
 |---|---|---|
-| `id` | UUID | PK, default `gen_random_uuid()` |
+| `id` | UUID | PK |
 | `name` | TEXT | NOT NULL |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
 
@@ -391,7 +320,7 @@ Indexes: `idx_documents_tenant_kb` on `(tenant_id, knowledge_base_id)`; **unique
 | `embedding_*` | `vector(*)` | **Sparse Dimension Columns** (`384`, `512`, `768`, `1024`, `1536`, `3072`). Only the column matching the knowledge_base's `embedding_dim` is populated. |
 | `metadata` | JSONB | NOT NULL, default `'{}'` |
 
-Indexes: `idx_chunks_tenant_doc` on `(tenant_id, document_id)`. Plus HNSW ANN indexes on every sparse dimension column (e.g., `idx_chunks_emb_1536`) created statically in `V1__init_schema.sql` to avoid runtime DDL.
+Indexes: `idx_chunks_tenant_doc` on `(tenant_id, document_id)`. Plus HNSW ANN indexes on every sparse dimension column (e.g., `idx_chunks_emb_1536`) created idempotently by `AnnIndexBootstrapRunner` on every startup (`CREATE INDEX IF NOT EXISTS`) — a fixed, static set of six indexes, no per-tenant or otherwise dynamic runtime DDL.
 
 ### `ingestion_jobs`
 
@@ -410,9 +339,9 @@ Index: `idx_ingestion_jobs_tenant_doc` on `(tenant_id, document_id)`. `document_
 
 > **✅ Decision (Grooming #16 — Missing FKs on `tenant_id`):** The absence of FK constraints on `tenant_id` in `documents`, `chunks`, and `ingestion_jobs` is **intentional** — denormalized for query-filter performance, integrity enforced at the application layer. Unlike `api_keys.tenant_id` and `knowledge_bases.tenant_id` which do reference `tenants(id)`, these tables rely on app-layer enforcement.
 
-### Migration File (Pointer)
+### Schema Source (Pointer)
 
-The executable migration is `V1__init_schema.sql`, given in full above under *Self-Executing Bootstrap*. It is not repeated to avoid two drifting copies of the same DDL.
+The authoritative schema is the JPA `@Entity` classes under each domain package, generated/validated via Hibernate `ddl-auto` per the profile table above, with the ANN indexes/`CHECK` constraints added by `AnnIndexBootstrapRunner` (*Schema Realization* above). The column-level tables in this section are the design spec those entities must match — there's no separate migration file to keep in sync.
 
 ---
 
@@ -701,7 +630,7 @@ Note: pure-`keyword` mode never embeds the query, so keyword search works even i
 > **✅ Decision (Grooming #14 — pgvector ANN index - Sparse Columns):** The **best and most optimized search flow** is in scope. To support HNSW ANN indexing without requiring dangerous runtime DDL (like dynamic table partitions or thousands of partial indexes), the schema uses **Sparse Dimension Columns**.
 >
 > - The `chunks` table pre-defines explicit columns for supported dimensions (e.g., `embedding_384`, `embedding_512`, `embedding_768`, `embedding_1024`, `embedding_1536`, `embedding_3072`).
-> - HNSW indexes are created statically on these columns during the `V1__init_schema` migration.
+> - HNSW indexes are created on these columns idempotently by `AnnIndexBootstrapRunner` at every app startup (Stage 0.5), not by a migration file.
 > - At ingestion and query time, the app routes the vector to the specific column that matches the Knowledge Base's `embedding_dim`. This guarantees fast ANN search with zero operational runtime DDL risk.
 
 ---
@@ -855,7 +784,7 @@ These apply to **every stage** without exception:
 | Concern | Detail |
 |---|---|
 | **Tenant isolation** | Non-negotiable. Every read/write is `tenant_id`-scoped; never weaken, skip, or delete an isolation test — a failing one means the code is wrong. Each stage adds its own isolation tests. |
-| **Errors** | RFC 7807 problem-details on every endpoint; all under `/api/v1`. Missing model config → `422`. DB not ready → `503`. Unsupported type → `415`. File too large → `413`. |
+| **Errors** | RFC 7807 problem-details on every endpoint; all under `/api/v1`. Missing model config → `422`. Unsupported type → `415`. File too large → `413`. (No "DB not ready" `503` contract — Stage 0's standard fail-fast startup means the app never accepts traffic before the DB/schema is ready.) |
 | **Observability** | Correlation ID generated/propagated on every request and into async threads via `TaskDecorator`. |
 | **Config & secrets** | Per-profile YAML; secrets only via env vars; never logged. Provider credentials Base64-encoded at rest (Stage 2). |
 | **Done-gate** | A task is only done when `./mvnw clean verify` is green, the behavior is tested at the right level, and `implementation/memory.md` is updated. |
@@ -969,7 +898,7 @@ All grooming items from the original draft (plus later-added items #22–28) are
 | 19 | Error contract (no model config) | `422 Unprocessable Entity` — "model config not set for tenant" |
 | 22 | API Key Auto-Sync | Sync updated `model_configs` credentials to existing knowledge_base snapshots |
 | 23 | knowledge_base Model Lock / Snapshot | Snapshot the global model config into a knowledge_base-specific table on creation to prevent semantic drift |
-| 24 | ANN Index Strategy | Use "Sparse Dimension Columns" (384, 512, 768, 1024, 1536, 3072) with static schema HNSW indexes to avoid runtime DDL |
+| 24 | ANN Index Strategy | Use "Sparse Dimension Columns" (384, 512, 768, 1024, 1536, 3072) with HNSW indexes created idempotently by the startup `AnnIndexBootstrapRunner` (no Flyway, no per-tenant/dynamic runtime DDL) |
 | 25 | knowledge_base Limit | Maximum of 10 Knowledge Bases per tenant |
 | 26 | Retry via re-upload on FAILED | Duplicate upload against a `FAILED` job resets and re-dispatches the same document/job in place, rather than staying permanently stuck |
 | 27 | Reranker model correction | Replaced English-only `ms-marco-MiniLM-L-6-v2` example with genuinely multilingual `BAAI/bge-reranker-v2-m3` |
@@ -978,6 +907,7 @@ All grooming items from the original draft (plus later-added items #22–28) are
 | 30 | `documents.status` / `ingestion_jobs.status` duplication | Intentional read-optimized denormalization: `ingestion_jobs` is authoritative, `documents.status` is a same-transaction mirror for join-free listing/status reads |
 | 31 | MCP `create_knowledge_base` params corrected | Removed the erroneous `embedding_dim` caller param from `mcp_plan.md` — it must match this plan's Grooming #5b (server-derived only) |
 | 32 | Reconciliation cron vs. job status | Cron compares Postgres `chunks` to the Lucene index directly (not via `ingestion_jobs.status`); a job `FAILED` only because the post-commit Lucene write threw gets its missing entries indexed and flipped back to `READY` |
+| 33 | Flyway removed; Hibernate `ddl-auto` owns schema (`plan.md` §9, 2026-07-16) | No migration files. `ddl-auto` is `update` (`local`/`dev`), `create-drop` (`test`), `validate` (`prod`). `DatabaseBootstrapRunner` still creates the Postgres role/database/`vector` extension at startup (`ddl-auto` can't); `AnnIndexBootstrapRunner` idempotently adds HNSW indexes/`CHECK` constraints on every startup. The old "app starts with zero DB present" hard rule is dropped in favor of standard Spring Boot fail-fast startup |
 
 ---
 
