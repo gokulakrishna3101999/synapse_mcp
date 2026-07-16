@@ -33,7 +33,7 @@
 |---|---|
 | `plan.md` | Master roadmap — all three phases (RAG core, MCP, infra/OSS). The full picture. |
 | `rag_plan.md` (this file) | The RAG app slice only, sequenced along the user-facing flow. The thing you build first. All grooming decisions finalized. |
-| `memory.md` | Living execution log (current phase, completed tasks, decisions/fixes). Not a roadmap. |
+| `implementation/memory.md` | Living execution log (current phase, completed tasks, decisions/fixes). Not a roadmap. |
 
 This plan **does not restate** shared conventions (RFC 7807 errors, correlation IDs, `./mvnw clean verify` as the done-gate, Conventional Commits). Those live in `PLAN.md` §4 and `CLAUDE.md` and apply here unchanged. (Note: Package layout is defined in Stage 0).
 
@@ -44,7 +44,7 @@ This plan **does not restate** shared conventions (RFC 7807 errors, correlation 
 ### In Scope — The RAG App (the 6-step flow)
 
 - Tenant provisioning
-- Model config (with optional credential encryption)
+- Model config (Base64-encoded credential storage)
 - Knowledge-base CRUD (create, list, update, delete)
 - Async document ingestion (extract → chunk → embed → store → index)
 - Hybrid retrieval with ANN-optimized vector search
@@ -224,7 +224,7 @@ CREATE TABLE model_configs (
   chat_model TEXT NOT NULL,
   embedding_provider TEXT NOT NULL CHECK (embedding_provider IN ('openai', 'ollama', 'google-genai')),
   embedding_model TEXT NOT NULL,
-  provider_credentials TEXT,   -- JSON: {"chatApiKey": "", "embeddingApiKey": ""} (optionally encrypted — see Stage 2)
+  provider_credentials TEXT,   -- JSON: {"chatApiKey": "", "embeddingApiKey": ""}, Base64-encoded (see Stage 2)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -243,7 +243,7 @@ CREATE TABLE knowledge_base_model_configs (
   chat_model TEXT NOT NULL,
   embedding_provider TEXT NOT NULL,
   embedding_model TEXT NOT NULL,
-  provider_credentials TEXT,
+  provider_credentials TEXT,   -- Base64-encoded, synced from model_configs (see Stage 2 Grooming #22)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -328,7 +328,7 @@ Indexes: unique on `key_hash`; index on `tenant_id`.
 | `chat_model` | TEXT | NOT NULL |
 | `embedding_provider` | TEXT | NOT NULL, CHECK IN (`openai`,`ollama`,`google-genai`) — note: **no `anthropic`**, Anthropic has no embeddings API |
 | `embedding_model` | TEXT | NOT NULL |
-| `provider_credentials` | TEXT | JSON: `{"chatApiKey": "", "embeddingApiKey": ""}` — optionally encrypted (see Stage 2 encryption flag) |
+| `provider_credentials` | TEXT | JSON: `{"chatApiKey": "", "embeddingApiKey": ""}`, Base64-encoded (see Stage 2) |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
 
 One config row per tenant (`tenant_id UNIQUE`) — a tenant has exactly one active provider/model selection at a time.
@@ -358,7 +358,7 @@ Constraint: `UNIQUE (tenant_id, name)`. `embedding_dim` is **auto-derived** from
 | `chat_model` | TEXT | NOT NULL |
 | `embedding_provider` | TEXT | NOT NULL |
 | `embedding_model` | TEXT | NOT NULL |
-| `provider_credentials` | TEXT | JSON (optionally encrypted) |
+| `provider_credentials` | TEXT | JSON, Base64-encoded |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
 
 This table acts as a permanent snapshot of the tenant's model configuration taken at the time the knowledge_base was created. This locks the knowledge_base to a specific model to ensure vector dimensions and semantic spaces never drift.
@@ -451,7 +451,7 @@ The executable migration is `V1__init_schema.sql`, given in full above under *Se
 | Endpoints | `PUT /api/v1/tenants/{tenantId}/model-config`, `GET .../model-config` |
 | Auth | Tenant-key-only, own-tenant-only |
 | Stores | `model_configs`: chat model + embedding model + provider credentials |
-| Credential storage | **Optional encryption** — plaintext by default (self-hosted tradeoff), with an **encryption flag** to enable encrypted-at-rest credentials |
+| Credential storage | **Base64-encoded** JSON (`plan.md` §9, 2026-07-16) — obfuscation, not encryption; no key material, no mandatory boot secret |
 | Never | Credentials are never echoed back in any response |
 | Providers | OpenAI, Google GenAI, Ollama (chat also: Anthropic — no embeddings) |
 
@@ -469,7 +469,7 @@ Stage 4/5 ingestion and Stage 6 `ask` rely on the **knowledge_base-specific snap
 
 ### Decisions
 
-> **✅ Decision (Grooming #3 — Credential storage):** Add an **optional encryption flag** for credentials in this milestone. By default, credentials are stored as plaintext JSON (self-hosted tradeoff). When the encryption flag is enabled, credentials are encrypted at rest. This balances the self-hosted simplicity with security-conscious deployments.
+> **✅ Decision (Grooming #3 — Credential storage, superseded `plan.md` §9 2026-07-16):** Credentials are stored **Base64-encoded**, not plaintext and not AES-GCM-encrypted. This is an app-layer encode/decode transform with no key material — explicitly **obfuscation, not confidentiality** (trivially reversible by anyone with DB access), chosen over reintroducing AES-GCM/key management while still avoiding a byte-for-byte human-readable API key in a raw text column. No encryption flag, no mandatory boot secret.
 
 > **✅ Decision (Grooming #22 — API Key Auto-Sync):** If a tenant updates their global provider credentials in `model_configs` (e.g. key rotation), the system automatically syncs the new credentials to all existing `knowledge_base_model_configs` rows that share the same `chat_provider` or `embedding_provider`. The model names themselves remain permanently locked to the knowledge_base.
 
@@ -484,7 +484,7 @@ Stage 4/5 ingestion and Stage 6 `ask` rely on the **knowledge_base-specific snap
 - A tenant can set and retrieve a config.
 - A request-time factory resolves the correct provider/model from it without an app restart.
 - Credentials never leak in responses or logs.
-- Optional encryption flag works correctly when enabled.
+- Credentials round-trip correctly through Base64 encode/decode (stored encoded, decoded and usable by `ChatModelFactory`/`EmbeddingModelFactory` at resolution time).
 - Tenant-isolation test: tenant B cannot read or modify tenant A's config.
 
 ---
@@ -508,6 +508,8 @@ Stage 4/5 ingestion and Stage 6 `ask` rely on the **knowledge_base-specific snap
 > **✅ Decision (Grooming #5a — knowledge_base update/delete):** knowledge_base **update and delete** are **in scope** for the RAG-app milestone. Full CRUD: create, list, update (name only — `embedding_dim` is immutable), and delete (cascading to documents and chunks).
 
 > **✅ Decision (Grooming #5b — `embedding_dim` derivation):** `embedding_dim` is **auto-derived** from the tenant's configured embedding model in `model_configs`. The caller does **not** pass `embedding_dim` explicitly. At knowledge_base creation time, the system resolves the tenant's current embedding model and determines its dimension automatically. This requires a valid `model_configs` row to exist before creating a knowledge_base (returns `422` if missing). **Crucially, the derived dimension must exactly match one of the allowed sparse column sizes (384, 512, 768, 1024, 1536, 3072).** If the model outputs an unsupported dimension, knowledge_base creation is rejected with a `422 Unprocessable Entity` stating the dimension is not supported.
+>
+> **✅ Decision (`plan.md` §9, 2026-07-16 — derivation mechanism):** Derivation is a **live probe call**, not a static model-name→dimension lookup table. `KnowledgeBaseService` resolves the tenant's `EmbeddingModel` via `EmbeddingModelFactory` (Stage 2) and calls `embed()` once against a fixed constant probe string, measuring the returned vector's length. A static table was rejected because Ollama permits arbitrary user-pulled embedding models with no fixed registry to look up. **If the probe call itself throws** (bad credentials, unreachable provider, unknown model name), knowledge_base creation returns `422 Unprocessable Entity` with a problem-detail explaining the embedding model failed validation — the same status code as the missing-config and unsupported-dimension cases above, not a new one.
 
 ### Done When
 
@@ -515,6 +517,7 @@ Stage 4/5 ingestion and Stage 6 `ask` rely on the **knowledge_base-specific snap
 - Another tenant's knowledge_bases never appear in the list.
 - `embedding_dim` is auto-derived and fixed at creation; the caller doesn't specify it.
 - Attempting to create a knowledge_base without a `model_configs` row returns `422`.
+- The embedding dimension is derived via a live probe call to the resolved embedding model, not a lookup table; a failed probe call (bad credentials, unreachable provider) returns `422`.
 - Attempting to create a knowledge_base with an unsupported model dimension returns `422`.
 - Attempting to create more than 10 knowledge_bases returns `422`.
 - Delete cascades correctly to associated documents and chunks.
@@ -585,7 +588,7 @@ This is the ingestion pipeline. It runs on a dedicated bounded executor **after*
 extract → chunk → embed (batched) → persist → index (Lucene) → mark READY
 ```
 
-Job state machine: `PENDING → INDEXING → READY | FAILED` (`ingestion_jobs`, with per-stage `stage` for observability).
+Job state machine: `PENDING → INDEXING → READY | FAILED` (`ingestion_jobs`, with per-stage `stage` for observability). `ingestion_jobs` is the authoritative record of this state; `documents.status` is written to the identical value in the **same transaction** at every transition (Grooming #30) — a read-optimized mirror only, never updated independently.
 
 ### Executor Configuration
 
@@ -633,7 +636,7 @@ Strategy-based (`ChunkingStrategy` SPI) with an `@Order` priority chain and a si
 
 ### Lucene ↔ Postgres Reconciliation
 
-> **✅ Decision (Grooming #7):** A **basic reconciliation cron** is included in this milestone. The cron detects drift between the Lucene index and Postgres `chunks` table (e.g., orphaned Lucene entries, missing index entries for committed chunks) and repairs them. Runs at a configurable interval (e.g., every hour). Does not need to be real-time — eventual consistency is acceptable.
+> **✅ Decision (Grooming #7):** A **basic reconciliation cron** is included in this milestone. The cron detects drift between the Lucene index and Postgres `chunks` table (e.g., orphaned Lucene entries, missing index entries for committed chunks) and repairs them. Runs at a configurable interval (e.g., every hour). Does not need to be real-time — eventual consistency is acceptable. The cron compares Postgres `chunks` against the Lucene index **directly by knowledge_base**, independent of `ingestion_jobs.status` — this also covers the specific case where Postgres commit succeeded but the subsequent Lucene write then threw (job recorded `FAILED` despite the chunks being fully durable): the cron indexes the missing Lucene entries and flips that job back to `READY`, rather than leaving a permanently `FAILED` job for data that is actually complete and searchable.
 
 ---
 
@@ -854,8 +857,8 @@ These apply to **every stage** without exception:
 | **Tenant isolation** | Non-negotiable. Every read/write is `tenant_id`-scoped; never weaken, skip, or delete an isolation test — a failing one means the code is wrong. Each stage adds its own isolation tests. |
 | **Errors** | RFC 7807 problem-details on every endpoint; all under `/api/v1`. Missing model config → `422`. DB not ready → `503`. Unsupported type → `415`. File too large → `413`. |
 | **Observability** | Correlation ID generated/propagated on every request and into async threads via `TaskDecorator`. |
-| **Config & secrets** | Per-profile YAML; secrets only via env vars; never logged. Optional credential encryption (Stage 2). |
-| **Done-gate** | A task is only done when `./mvnw clean verify` is green, the behavior is tested at the right level, and `MEMORY.md` is updated. |
+| **Config & secrets** | Per-profile YAML; secrets only via env vars; never logged. Provider credentials Base64-encoded at rest (Stage 2). |
+| **Done-gate** | A task is only done when `./mvnw clean verify` is green, the behavior is tested at the right level, and `implementation/memory.md` is updated. |
 
 ---
 
@@ -868,7 +871,7 @@ The stages are built in this order:
 ### Milestone 1 — Setup Path Works
 **Stages 1 → 2 → 3** callable end-to-end (tenant, config, knowledge_base) with isolation.
 - Tenant creation with API key
-- Model config (with optional encryption)
+- Model config (Base64-encoded credential storage)
 - knowledge_base CRUD (create, list, update, delete) with auto-derived `embedding_dim`
 - Tenant-isolation tests for each stage
 
@@ -928,7 +931,7 @@ After core RAG is fully working, build the **SPI interfaces** for external docum
 - [ ] Reranking improves retrieval precision (measurable via evaluate endpoint).
 - [ ] Streaming (SSE) answers work end-to-end.
 - [ ] Multi-language responses work correctly.
-- [ ] Optional credential encryption works when enabled.
+- [ ] Credentials round-trip correctly through Base64 encode/decode and never leak in responses or logs.
 - [ ] Lucene ↔ Postgres reconciliation cron detects and fixes drift.
 - [ ] Basic ingestion metrics (jobs by state, failure counts) are exposed.
 - [ ] Evaluate endpoint returns relevance metrics for golden queries.
@@ -944,7 +947,7 @@ All grooming items from the original draft (plus later-added items #22–28) are
 |---|---|---|
 | 1 | Tenant-isolation tests | Folded into each stage (not a Stage-0 prerequisite) |
 | 2 | API-key model | Single key per tenant; rotation/multiple keys deferred |
-| 3 | Credential storage | Optional encryption flag added in this milestone |
+| 3 | Credential storage | Base64-encoded (obfuscation, not encryption) — superseded by `plan.md` §9 2026-07-16 |
 | 4 | Model-config validation | Fail at ingest/ask time with proper status codes; don't persist failed entries |
 | 5a | knowledge_base update/delete | In scope — full CRUD |
 | 5b | `embedding_dim` | Auto-derived from embedding model, not passed by caller |
@@ -971,6 +974,10 @@ All grooming items from the original draft (plus later-added items #22–28) are
 | 26 | Retry via re-upload on FAILED | Duplicate upload against a `FAILED` job resets and re-dispatches the same document/job in place, rather than staying permanently stuck |
 | 27 | Reranker model correction | Replaced English-only `ms-marco-MiniLM-L-6-v2` example with genuinely multilingual `BAAI/bge-reranker-v2-m3` |
 | 28 | MCP `ingest` input shape | Accepts file bytes or raw text only, normalized into the same pipeline as REST upload; URL/"reference" ingestion explicitly out of scope, deferred to external connectors (§2/Milestone 7) |
+| 29 | `embedding_dim` derivation mechanism | Live probe call (one `embed()` call against a fixed test string at KB creation), not a static model→dimension table — required to support arbitrary Ollama model names; probe failure returns `422` |
+| 30 | `documents.status` / `ingestion_jobs.status` duplication | Intentional read-optimized denormalization: `ingestion_jobs` is authoritative, `documents.status` is a same-transaction mirror for join-free listing/status reads |
+| 31 | MCP `create_knowledge_base` params corrected | Removed the erroneous `embedding_dim` caller param from `mcp_plan.md` — it must match this plan's Grooming #5b (server-derived only) |
+| 32 | Reconciliation cron vs. job status | Cron compares Postgres `chunks` to the Lucene index directly (not via `ingestion_jobs.status`); a job `FAILED` only because the post-commit Lucene write threw gets its missing entries indexed and flipped back to `READY` |
 
 ---
 
