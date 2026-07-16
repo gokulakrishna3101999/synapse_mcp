@@ -1,0 +1,29 @@
+# Same DB_URL/DB_USERNAME/DB_PASSWORD convention as application-local.yaml (see its comment).
+spring:
+  datasource:
+    url: ${DB_URL}/synapsemcp
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      # Same short-timeout rationale as application-local.yaml - see its comment.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:3000}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Same short-timeout rationale as application-local.yaml - see its comment.
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:1s}
+      timeout: ${REDIS_TIMEOUT:1s}
+
+synapsemcp:
+  bootstrap:
+    enabled: true
+    admin-database: postgres
+  ann-bootstrap:
+    enabled: true
+  redis:
+    key-prefix: synapsemcp

@@ -1,0 +1,33 @@
+# Same DB_URL/DB_USERNAME/DB_PASSWORD convention as application-local.yaml (see its comment).
+# Bootstrap runners are disabled in prod (rag_plan.md Stage 0.5, Grooming #18): the database, role,
+# vector extension, ANN indexes, and CHECK constraints must already exist via a controlled manual
+# provisioning step before the app starts, and ddl-auto never mutates the schema automatically.
+spring:
+  datasource:
+    url: ${DB_URL}/synapsemcp
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      # Same short-timeout rationale as application-local.yaml (HikariCP's own default is 30s) -
+      # override via DB_CONNECTION_TIMEOUT if prod's real network latency needs more.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:3000}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT}
+      # Same short-timeout rationale as application-local.yaml (Lettuce's own default is 60s) -
+      # override via REDIS_TIMEOUT/REDIS_CONNECT_TIMEOUT if prod's real network latency needs more.
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:1s}
+      timeout: ${REDIS_TIMEOUT:1s}
+
+synapsemcp:
+  bootstrap:
+    enabled: false
+  ann-bootstrap:
+    enabled: false
+  redis:
+    key-prefix: synapsemcp

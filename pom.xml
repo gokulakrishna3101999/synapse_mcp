@@ -8,27 +8,28 @@
 		<version>4.1.0</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com</groupId>
+	<groupId>com.synapsemcp</groupId>
 	<artifactId>synapsemcp</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name/>
-	<description/>
-	<url/>
-	<licenses>
-		<license/>
-	</licenses>
-	<developers>
-		<developer/>
-	</developers>
-	<scm>
-		<connection/>
-		<developerConnection/>
-		<tag/>
-		<url/>
-	</scm>
+	<name>synapsemcp</name>
+	<description>SynapseMCP - Multi-tenant RAG + MCP Spring Boot application</description>
 	<properties>
 		<java.version>21</java.version>
+		<hibernate-vector.version>7.4.1.Final</hibernate-vector.version>
+		<spring-ai.version>2.0.0</spring-ai.version>
+		<google-genai.version>1.58.0</google-genai.version>
 	</properties>
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.ai</groupId>
+				<artifactId>spring-ai-bom</artifactId>
+				<version>${spring-ai.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
 	<dependencies>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -37,7 +38,96 @@
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.hibernate.orm</groupId>
+			<artifactId>hibernate-vector</artifactId>
+			<version>${hibernate-vector.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-redis</artifactId>
+		</dependency>
+
+		<!-- Provides RestTemplateBuilder, required by spring-boot-resttestclient's TestRestTemplate -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-restclient</artifactId>
+		</dependency>
+
+		<!-- rag_plan.md Stage 2: chat providers OpenAI/Anthropic/Ollama/Google GenAI, embedding
+		     providers OpenAI/Ollama/Google GenAI (no Anthropic - it has no embeddings API).
+		     Deliberately the bare model artifacts, not the `-starter-model-*` ones: the starters bundle
+		     Spring Boot autoconfiguration that eagerly constructs global provider client beans (e.g.
+		     com.google.genai.Client) from spring.ai.* properties at context startup and fails hard
+		     without them - verified empirically. This project never uses those beans anyway (Stage 2's
+		     own Hard Rule: ChatModelFactory/EmbeddingModelFactory build per-tenant instances directly
+		     via each provider's builder, reading provider/model/credentials from the model_configs
+		     table at request time, not from any spring.ai.* config). The bare artifacts contain the
+		     same OpenAiChatModel/OpenAiEmbeddingModel/AnthropicChatModel/OllamaChatModel/
+		     OllamaEmbeddingModel/GoogleGenAiChatModel/GoogleGenAiTextEmbeddingModel builder classes
+		     with zero autoconfiguration - confirmed no @AutoConfiguration classes, spring.factories, or
+		     *.imports files in any of them - so there's nothing to disable or configure at all. -->
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-openai</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-anthropic</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-ollama</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-google-genai</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-google-genai-embedding</artifactId>
+		</dependency>
+
+		<!-- ChatModelFactory/EmbeddingModelFactory (Stage 2) import com.google.genai.Client/HttpOptions
+		     directly to build per-tenant clients - declared explicitly, pinned to the version already
+		     resolved transitively via spring-ai-google-genai-embedding, rather than riding on another
+		     artifact's transitive dependency (plan.md §9, 2026-07-13). -->
+		<dependency>
+			<groupId>com.google.genai</groupId>
+			<artifactId>google-genai</artifactId>
+			<version>${google-genai.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- TestRestTemplate moved out of spring-boot-test into its own module in Boot 4.x -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-resttestclient</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
@@ -47,6 +137,51 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<!-- *Test = unit tests, no external dependencies (plan.md §3 Testing setup) -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>**/*IntegrationTest.java</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
+			<!-- *IntegrationTest = real isolated synapsemcp_test DB, run by `./mvnw verify` (plan.md §3) -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-failsafe-plugin</artifactId>
+				<configuration>
+					<includes>
+						<include>**/*IntegrationTest.java</include>
+					</includes>
+				</configuration>
+				<executions>
+					<execution>
+						<goals>
+							<goal>integration-test</goal>
+							<goal>verify</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
+			<!-- `./mvnw spotless:apply` (plan.md §3 canonical commands) - found genuinely broken (no
+			     plugin declared) during a documentation-accuracy audit; wired up here to match. -->
+			<plugin>
+				<groupId>com.diffplug.spotless</groupId>
+				<artifactId>spotless-maven-plugin</artifactId>
+				<version>2.44.5</version>
+				<configuration>
+					<java>
+						<!-- AOSP style = 4-space indent, matching the code already written; the plain
+						     Google style defaults to 2-space and would reformat every existing file. -->
+						<googleJavaFormat>
+							<style>AOSP</style>
+						</googleJavaFormat>
+						<removeUnusedImports/>
+					</java>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>

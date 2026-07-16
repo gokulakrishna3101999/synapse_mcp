@@ -1,3 +1,14 @@
 spring:
   application:
     name: synapsemcp
+  profiles:
+    default: local
+
+management:
+  health:
+    redis:
+      # Redis is a fail-open dependency by design (TenantCreationRateLimitFilter, rag_plan.md Stage 1) -
+      # it must never gate /actuator/health, or a Redis outage would make an orchestrator kill/remove
+      # otherwise-healthy pods, directly contradicting the "don't let a Redis blip take the app down"
+      # intent. Found empirically: booting with Redis stopped flipped health to DOWN before this was set.
+      enabled: false

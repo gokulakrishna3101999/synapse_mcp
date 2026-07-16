@@ -1,0 +1,40 @@
+# DB_URL must be the JDBC base URL WITHOUT a database name, e.g.:
+#   export DB_URL=jdbc:postgresql://localhost:5432
+#   export DB_USERNAME=<a role that can already authenticate to Postgres, e.g. your OS username>
+#   export DB_PASSWORD=<its password, empty string if using trust/peer auth>
+# Each profile appends its own database name to DB_URL (see spring.datasource.url below), so one
+# set of env vars covers every profile. The same credentials double as the bootstrap admin
+# connection (com.synapsemcp.config.DatabaseBootstrapRunner) used to create the database itself
+# and enable the vector extension - see rag_plan.md Stage 0.5.
+spring:
+  datasource:
+    url: ${DB_URL}/synapsemcp
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      # HikariCP's own default connection-timeout is 30s - verified empirically that a mid-flight
+      # Postgres outage made every DB-touching request hang 30s before failing; short, explicit
+      # timeout so it surfaces in a few seconds instead (plan.md §9, 2026-07-16).
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:3000}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Short, explicit timeouts (Lettuce's own default is 60s) - TenantCreationRateLimitFilter's
+      # "fail open on Redis outage" promise is worthless if a blocked command takes 60s to fail;
+      # verified empirically, see plan.md §9, 2026-07-16.
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:1s}
+      timeout: ${REDIS_TIMEOUT:1s}
+
+synapsemcp:
+  bootstrap:
+    enabled: true
+    admin-database: postgres
+  ann-bootstrap:
+    enabled: true
+  redis:
+    key-prefix: synapsemcp
