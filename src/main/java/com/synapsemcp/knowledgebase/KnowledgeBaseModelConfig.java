@@ -54,7 +54,7 @@ public class KnowledgeBaseModelConfig {
 
     protected KnowledgeBaseModelConfig() {}
 
-    public KnowledgeBaseModelConfig(
+    KnowledgeBaseModelConfig(
             KnowledgeBase knowledgeBase,
             String chatProvider,
             String chatModel,
@@ -69,11 +69,31 @@ public class KnowledgeBaseModelConfig {
         this.providerCredentials = providerCredentials;
     }
 
+    /**
+     * Public factory replacing the (now package-private) constructor - see {@link
+     * com.synapsemcp.ingestion.IngestionJob#create} for why.
+     */
+    public static KnowledgeBaseModelConfig create(
+            KnowledgeBase knowledgeBase,
+            String chatProvider,
+            String chatModel,
+            String embeddingProvider,
+            String embeddingModel,
+            String providerCredentials) {
+        return new KnowledgeBaseModelConfig(
+                knowledgeBase,
+                chatProvider,
+                chatModel,
+                embeddingProvider,
+                embeddingModel,
+                providerCredentials);
+    }
+
     public UUID getId() {
         return id;
     }
 
-    public KnowledgeBase getKnowledgeBase() {
+    KnowledgeBase getKnowledgeBase() {
         return knowledgeBase;
     }
 

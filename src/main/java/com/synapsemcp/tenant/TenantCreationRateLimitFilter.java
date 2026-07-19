@@ -62,7 +62,7 @@ public class TenantCreationRateLimitFilter extends OncePerRequestFilter {
     private final long limit;
     private final long windowSeconds;
 
-    public TenantCreationRateLimitFilter(
+    TenantCreationRateLimitFilter(
             StringRedisTemplate redisTemplate,
             RedisKeyPrefix redisKeyPrefix,
             @Value("${synapsemcp.rate-limit.tenant-creation.limit:5}") long limit,

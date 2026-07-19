@@ -11,6 +11,8 @@ spring:
       # Same short-timeout rationale as application-local.yaml (HikariCP's own default is 30s) -
       # override via DB_CONNECTION_TIMEOUT if prod's real network latency needs more.
       connection-timeout: ${DB_CONNECTION_TIMEOUT:3000}
+      # hnsw.iterative_scan = relaxed_order (pgvector 0.8+) - see application-local.yaml's comment.
+      connection-init-sql: SET lock_timeout = '${DB_LOCK_TIMEOUT:3s}'; SET hnsw.iterative_scan = relaxed_order
   jpa:
     hibernate:
       ddl-auto: validate

@@ -31,17 +31,31 @@ import org.springframework.http.HttpStatus;
 class EmbeddingModelFactoryTest {
 
     private final ModelConfigRepository modelConfigRepository = mock(ModelConfigRepository.class);
-    private final EmbeddingModelFactory factory = new EmbeddingModelFactory(modelConfigRepository);
+    private final EmbeddingModelFactory factory =
+            new EmbeddingModelFactory(modelConfigRepository, 30);
     private final UUID tenantId = UUID.randomUUID();
 
     private static Stream<String> embeddingProviders() {
         return Stream.of("openai", "ollama", "google-genai");
     }
 
+    /**
+     * Found during a later audit pass: OkHttp treats a {@code 0} timeout as "no timeout at all,"
+     * not "fail instantly" - a natural but wrong operator assumption that would otherwise silently
+     * disable this class's entire timeout fix. Rejected at construction instead.
+     */
+    @Test
+    void rejectsAZeroOrNegativeTimeoutAtConstruction() {
+        assertThatThrownBy(() -> new EmbeddingModelFactory(modelConfigRepository, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EmbeddingModelFactory(modelConfigRepository, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     private void stubModelConfig(String embeddingProvider) {
         Tenant tenant = mock(Tenant.class);
         ModelConfig modelConfig =
-                new ModelConfig(
+                ModelConfig.create(
                         tenant,
                         "openai",
                         "gpt-4o",

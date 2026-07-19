@@ -12,6 +12,12 @@ import org.springframework.context.ApplicationEvent;
  */
 public class ModelConfigUpdatedEvent extends ApplicationEvent {
 
+    // ApplicationEvent implements Serializable by inheritance from java.util.EventObject; this
+    // event is only ever dispatched synchronously in-JVM (never actually serialized), but an
+    // explicit UID avoids relying on the JVM's structure-derived default (SpotBugs
+    // SE_NO_SERIALVERSIONID, `plan.md` §9 2026-07-17).
+    private static final long serialVersionUID = 1L;
+
     private final UUID tenantId;
 
     public ModelConfigUpdatedEvent(Object source, UUID tenantId) {

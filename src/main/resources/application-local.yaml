@@ -16,6 +16,20 @@ spring:
       # Postgres outage made every DB-touching request hang 30s before failing; short, explicit
       # timeout so it surfaces in a few seconds instead (plan.md §9, 2026-07-16).
       connection-timeout: ${DB_CONNECTION_TIMEOUT:3000}
+      # Postgres's own lock_timeout default is 0 (disabled - a SELECT ... FOR UPDATE waits forever
+      # for a contended row). Verified empirically (plan.md §9, 2026-07-17): manually held a lock on
+      # a tenant row for 25s and a concurrent knowledge_base creation for that tenant waited the full
+      # duration with no timeout, tying up a Tomcat thread and a pooled connection the whole time.
+      # Applied via connection-init-sql so every pooled connection gets the bound, not just
+      # KnowledgeBaseService's own SELECT ... FOR UPDATE - a defensive backstop for any current or
+      # future row lock in the app.
+      # hnsw.iterative_scan = relaxed_order (pgvector 0.8+): rag_plan.md Stage 6a's VectorSearchService
+      # filters chunks by knowledge_base_id/tenant_id alongside an ORDER BY <=> LIMIT - confirmed live
+      # via EXPLAIN ANALYZE (plan.md §9, 2026-07-18) that a plain (non-iterative) HNSW scan under a
+      # filter like this can silently return fewer/zero rows despite real matches existing elsewhere
+      # in the vector space. This setting is a correctness requirement for whenever the planner does
+      # choose the index path - it does not by itself force that choice (still cost-based).
+      connection-init-sql: SET lock_timeout = '${DB_LOCK_TIMEOUT:3s}'; SET hnsw.iterative_scan = relaxed_order
   jpa:
     hibernate:
       ddl-auto: update

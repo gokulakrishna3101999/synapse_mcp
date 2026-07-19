@@ -19,6 +19,7 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
@@ -43,25 +44,33 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * com.synapsemcp.tenant.ApiKeyAuthenticationFilter} so an oversized request never wastes a Redis or
  * DB round trip.
  *
- * <p><b>Stage 4 TODO (found during a later audit pass, 2026-07-17):</b> this filter is global and
- * has no exemption mechanism, so it will also fully buffer - and reject at 1MB - the planned {@code
- * POST /api/v1/knowledgebase/{id}/documents} multipart file upload endpoint once it exists, before
- * that endpoint's own Tika-sniffing/validation logic ever runs. rag_plan.md Stage 4 already
- * documents its own, much larger cap ("size cap (20 MB → 413)") - this filter's 1MB default would
- * silently shadow that and reject every legitimate upload over 1MB long before Stage 4's own check
- * is ever reached. When Stage 4 is built, add a {@code shouldNotFilter} exemption for that path so
- * it owns its own 20MB limit - don't let document uploads inherit this JSON-control-plane-sized
- * limit.
+ * <p><b>Stage 4 exemption (rag_plan.md Stage 4, implemented `plan.md` §9 2026-07-17):</b> exempts
+ * {@code POST /api/v1/knowledgebase/{id}/documents} via {@link #shouldNotFilter} - that endpoint
+ * documents its own, much larger cap ("size cap (20 MB → 413)"), enforced instead by Spring's own
+ * multipart resolver ({@code spring.servlet.multipart.max-file-size}). Without this exemption, this
+ * filter's 1MB default would silently shadow that and reject every legitimate upload over 1MB
+ * before the upload endpoint's own logic ever ran - this filter also fully buffers the body into
+ * memory, which is the wrong approach for a 20MB binary file anyway (Spring's own multipart
+ * handling streams to a configurable disk threshold instead).
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 1)
 public class RequestBodySizeLimitFilter extends OncePerRequestFilter {
+
+    private static final AntPathMatcher PATH_MATCHER = new AntPathMatcher();
+    private static final String DOCUMENT_UPLOAD_PATH_PATTERN = "/api/v1/knowledgebase/*/documents";
 
     private final long maxBytes;
 
     public RequestBodySizeLimitFilter(
             @Value("${synapsemcp.request.max-body-bytes:1048576}") long maxBytes) {
         this.maxBytes = maxBytes;
+    }
+
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        return "POST".equalsIgnoreCase(request.getMethod())
+                && PATH_MATCHER.match(DOCUMENT_UPLOAD_PATH_PATTERN, request.getRequestURI());
     }
 
     @Override

@@ -80,7 +80,7 @@ class ModelConfigServiceTest {
     void updatesTheExistingModelConfigRowInPlaceRatherThanCreatingANewOne() {
         Tenant tenant = tenantWithId(tenantId);
         ModelConfig existing =
-                new ModelConfig(
+                ModelConfig.create(
                         tenant,
                         "ollama",
                         "llama3",
@@ -95,7 +95,12 @@ class ModelConfigServiceTest {
 
         ConfigureModelRequest request =
                 new ConfigureModelRequest(
-                        "openai", "gpt-4o", "openai", "text-embedding-3-small", "sk-chat", null);
+                        "openai",
+                        "gpt-4o",
+                        "openai",
+                        "text-embedding-3-small",
+                        "sk-chat",
+                        "sk-embed");
         ModelConfigResponse response = modelConfigService.configureModel(tenantId, request);
 
         assertThat(response.chatProvider()).isEqualTo("openai");
@@ -113,6 +118,43 @@ class ModelConfigServiceTest {
         ConfigureModelRequest request =
                 new ConfigureModelRequest(
                         "bogus", "some-model", "openai", "text-embedding-3-small", null, null);
+
+        assertThatThrownBy(() -> modelConfigService.configureModel(tenantId, request))
+                .isInstanceOf(ApiException.class)
+                .satisfies(
+                        e ->
+                                assertThat(((ApiException) e).getStatus())
+                                        .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY));
+    }
+
+    /**
+     * Found live (audit session, 2026-07-17): this environment happens to have a real {@code
+     * OPENAI_API_KEY} set in the server process's own environment, and the OpenAI Java SDK silently
+     * falls back to it when a tenant's own {@code chatApiKey}/{@code embeddingApiKey} is blank - a
+     * cross-tenant billing/security leak on any deployment where that env var happens to be set.
+     * Rejecting a blank credential for key-requiring providers at write time closes this at the
+     * source. Ollama needs no credential and stays exempt (covered by the ollama-based tests
+     * above).
+     */
+    @Test
+    void rejectsABlankChatApiKeyForAProviderThatRequiresOne() {
+        ConfigureModelRequest request =
+                new ConfigureModelRequest(
+                        "openai", "gpt-4o", "ollama", "nomic-embed-text", null, null);
+
+        assertThatThrownBy(() -> modelConfigService.configureModel(tenantId, request))
+                .isInstanceOf(ApiException.class)
+                .satisfies(
+                        e ->
+                                assertThat(((ApiException) e).getStatus())
+                                        .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY));
+    }
+
+    @Test
+    void rejectsABlankEmbeddingApiKeyForAProviderThatRequiresOne() {
+        ConfigureModelRequest request =
+                new ConfigureModelRequest(
+                        "ollama", "llama3", "google-genai", "text-embedding-004", null, "");
 
         assertThatThrownBy(() -> modelConfigService.configureModel(tenantId, request))
                 .isInstanceOf(ApiException.class)
@@ -140,7 +182,7 @@ class ModelConfigServiceTest {
     void getModelConfigReturnsTheStoredConfigWithoutCredentials() {
         Tenant tenant = tenantWithId(tenantId);
         ModelConfig stored =
-                new ModelConfig(
+                ModelConfig.create(
                         tenant,
                         "openai",
                         "gpt-4o",
@@ -172,7 +214,7 @@ class ModelConfigServiceTest {
     void groomingTwentyTwo_onlySyncsTheCredentialHalfMatchingTheChangedProvider() {
         Tenant tenant = tenantWithId(tenantId);
         ModelConfig existing =
-                new ModelConfig(
+                ModelConfig.create(
                         tenant,
                         "openai",
                         "gpt-4o-mini",
@@ -188,7 +230,7 @@ class ModelConfigServiceTest {
         // Chat provider matches (openai), embedding provider does not (ollama) - only chatApiKey
         // syncs.
         KnowledgeBaseModelConfig matchingChatOnly =
-                new KnowledgeBaseModelConfig(
+                KnowledgeBaseModelConfig.create(
                         kb,
                         "openai",
                         "gpt-4o-mini",
@@ -198,7 +240,7 @@ class ModelConfigServiceTest {
                                 new ProviderCredentials("kb-old-chat", "kb-old-embed")));
         // Neither provider matches - left completely untouched.
         KnowledgeBaseModelConfig noMatch =
-                new KnowledgeBaseModelConfig(
+                KnowledgeBaseModelConfig.create(
                         kb,
                         "anthropic",
                         "claude-opus",

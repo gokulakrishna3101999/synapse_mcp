@@ -22,6 +22,21 @@ public class ModelConfigService {
     private static final Set<String> EMBEDDING_PROVIDERS =
             Set.of("openai", "ollama", "google-genai");
 
+    /**
+     * Providers whose Java SDK requires an explicit credential to construct a client at all -
+     * unlike Ollama (no auth), all three fall back to reading their own provider-specific API-key
+     * environment variable when the caller passes a blank/null key (confirmed live for OpenAI:
+     * {@code OPENAI_API_KEY}, via {@code com.openai.core.ClientOptions}). Found by an audit session
+     * (2026-07-17) that this environment happens to have a real {@code OPENAI_API_KEY} set in the
+     * server process's own environment - meaning a tenant leaving {@code chatApiKey}/{@code
+     * embeddingApiKey} blank would silently use, and get billed against, *the operator's own key*,
+     * with zero visibility. Rejecting a blank credential for these three providers at write time
+     * closes the gap at the source, before a tenant can ever reach a state where the SDK's fallback
+     * could trigger.
+     */
+    private static final Set<String> PROVIDERS_REQUIRING_CREDENTIALS =
+            Set.of("openai", "anthropic", "google-genai");
+
     private final ModelConfigRepository modelConfigRepository;
     private final TenantRepository tenantRepository;
     private final KnowledgeBaseModelConfigRepository knowledgeBaseModelConfigRepository;
@@ -42,6 +57,10 @@ public class ModelConfigService {
     public ModelConfigResponse configureModel(UUID tenantId, ConfigureModelRequest request) {
         validateProvider(request.chatProvider(), CHAT_PROVIDERS, "chat provider");
         validateProvider(request.embeddingProvider(), EMBEDDING_PROVIDERS, "embedding provider");
+        requireCredentialIfProviderNeedsOne(
+                request.chatProvider(), request.chatApiKey(), "chatApiKey");
+        requireCredentialIfProviderNeedsOne(
+                request.embeddingProvider(), request.embeddingApiKey(), "embeddingApiKey");
 
         ProviderCredentials credentials =
                 new ProviderCredentials(request.chatApiKey(), request.embeddingApiKey());
@@ -51,7 +70,7 @@ public class ModelConfigService {
         if (modelConfig == null) {
             Tenant tenant = tenantRepository.getReferenceById(tenantId);
             modelConfig =
-                    new ModelConfig(
+                    ModelConfig.create(
                             tenant,
                             request.chatProvider(),
                             request.chatModel(),
@@ -129,6 +148,17 @@ public class ModelConfigService {
         knowledgeBaseModelConfigRepository.saveAll(kbConfigs);
     }
 
+    private void requireCredentialIfProviderNeedsOne(
+            String provider, String apiKey, String fieldName) {
+        if (PROVIDERS_REQUIRING_CREDENTIALS.contains(provider)
+                && (apiKey == null || apiKey.isBlank())) {
+            throw new ApiException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Unprocessable Entity",
+                    fieldName + " is required for provider " + provider);
+        }
+    }
+
     private void validateProvider(String provider, Set<String> allowed, String fieldName) {
         if (!allowed.contains(provider)) {
             throw new ApiException(
@@ -140,7 +170,7 @@ public class ModelConfigService {
 
     private ModelConfigResponse toResponse(ModelConfig modelConfig) {
         return new ModelConfigResponse(
-                modelConfig.getTenant().getId(),
+                modelConfig.getTenantId(),
                 modelConfig.getChatProvider(),
                 modelConfig.getChatModel(),
                 modelConfig.getEmbeddingProvider(),

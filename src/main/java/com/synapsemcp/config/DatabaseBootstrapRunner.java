@@ -1,9 +1,11 @@
 package com.synapsemcp.config;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.regex.Pattern;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.springframework.boot.EnvironmentPostProcessor;
@@ -31,6 +33,17 @@ public class DatabaseBootstrapRunner implements EnvironmentPostProcessor, Ordere
     private static final Log log = LogFactory.getLog(DatabaseBootstrapRunner.class);
     private static final String DUPLICATE_DATABASE_SQLSTATE = "42P04";
 
+    /**
+     * Postgres has no parameterized-placeholder syntax for a DDL identifier ({@code CREATE DATABASE
+     * ?} isn't valid SQL), so string-building the identifier is unavoidable here - flagged by
+     * SpotBugs ({@code SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE}, `plan.md` §9 2026-07-17). {@code
+     * databaseName} only ever derives from this operator's own {@code spring.datasource.url}
+     * config, evaluated once at JVM startup on a {@code local}/{@code dev}-only path - never
+     * attacker-reachable - so this is defense-in-depth against a malformed config value, not a
+     * response to any real injection path.
+     */
+    private static final Pattern SAFE_IDENTIFIER = Pattern.compile("[A-Za-z0-9_]+");
+
     @Override
     public int getOrder() {
         return ConfigDataEnvironmentPostProcessor.ORDER + 10;
@@ -49,7 +62,7 @@ public class DatabaseBootstrapRunner implements EnvironmentPostProcessor, Ordere
         String adminDatabase =
                 environment.getProperty("synapsemcp.bootstrap.admin-database", "postgres");
 
-        String databaseName = extractDatabaseName(targetUrl);
+        String databaseName = requireSafeIdentifier(extractDatabaseName(targetUrl));
         String maintenanceUrl = withDatabase(targetUrl, adminDatabase);
 
         try (Connection connection =
@@ -68,6 +81,16 @@ public class DatabaseBootstrapRunner implements EnvironmentPostProcessor, Ordere
         }
     }
 
+    @SuppressFBWarnings(
+            value = "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
+            justification =
+                    "Postgres has no parameterized-placeholder syntax for a DDL identifier"
+                            + " (CREATE DATABASE ? isn't valid SQL). databaseName is validated against"
+                            + " SAFE_IDENTIFIER (alphanumeric/underscore only) before reaching this"
+                            + " method, and only ever derives from this operator's own"
+                            + " spring.datasource.url config on a local/dev-only startup path - not"
+                            + " attacker-reachable. SpotBugs can't see the validation step, so this"
+                            + " pattern match will always fire here regardless.")
     private void createDatabaseIfMissing(Connection connection, String databaseName)
             throws SQLException {
         try (Statement statement = connection.createStatement()) {
@@ -84,6 +107,16 @@ public class DatabaseBootstrapRunner implements EnvironmentPostProcessor, Ordere
         try (Statement statement = connection.createStatement()) {
             statement.execute("CREATE EXTENSION IF NOT EXISTS vector");
         }
+    }
+
+    private static String requireSafeIdentifier(String identifier) {
+        if (!SAFE_IDENTIFIER.matcher(identifier).matches()) {
+            throw new IllegalStateException(
+                    "spring.datasource.url's database name must be alphanumeric/underscore only,"
+                            + " got: "
+                            + identifier);
+        }
+        return identifier;
     }
 
     private static String extractDatabaseName(String jdbcUrl) {

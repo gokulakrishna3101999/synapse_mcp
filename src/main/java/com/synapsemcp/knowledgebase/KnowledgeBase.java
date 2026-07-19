@@ -10,21 +10,23 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
-import jakarta.persistence.UniqueConstraint;
 import java.util.UUID;
 
 /**
  * {@code embedding_dim} is auto-derived server-side at creation via a live probe of the tenant's
  * embedding model (rag_plan.md Stage 3, Grooming #5b) - never a caller input, and immutable once
  * set.
+ *
+ * <p>No JPA-level {@code @UniqueConstraint} on {@code (tenant_id, name)} - per-tenant name
+ * uniqueness is enforced by a case-insensitive functional unique index ({@code
+ * uq_knowledge_bases_tenant_name_ci} on {@code (tenant_id, lower(name))}, {@link
+ * com.synapsemcp.config.AnnIndexBootstrapRunner}, Grooming #52) instead, since plain JPA unique
+ * constraints can only express exact-value uniqueness and this project deliberately treats
+ * case-variant names (e.g. {@code "My KB"} vs {@code "my kb"}) as duplicates (`plan.md` §9,
+ * 2026-07-17).
  */
 @Entity
-@Table(
-        name = "knowledge_bases",
-        uniqueConstraints =
-                @UniqueConstraint(
-                        name = "uq_knowledge_bases_tenant_name",
-                        columnNames = {"tenant_id", "name"}))
+@Table(name = "knowledge_bases")
 public class KnowledgeBase {
 
     @Id
@@ -43,17 +45,25 @@ public class KnowledgeBase {
 
     protected KnowledgeBase() {}
 
-    public KnowledgeBase(Tenant tenant, String name, int embeddingDim) {
+    KnowledgeBase(Tenant tenant, String name, int embeddingDim) {
         this.tenant = tenant;
         this.name = name;
         this.embeddingDim = embeddingDim;
+    }
+
+    /**
+     * Public factory replacing the (now package-private) constructor - see {@link
+     * com.synapsemcp.ingestion.IngestionJob#create} for why.
+     */
+    public static KnowledgeBase create(Tenant tenant, String name, int embeddingDim) {
+        return new KnowledgeBase(tenant, name, embeddingDim);
     }
 
     public UUID getId() {
         return id;
     }
 
-    public Tenant getTenant() {
+    Tenant getTenant() {
         return tenant;
     }
 

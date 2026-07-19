@@ -105,4 +105,57 @@ class RequestBodySizeLimitFilterTest {
         assertThat(response.getStatus()).isEqualTo(200);
         assertThat(bodySeenDownstream[0]).isEqualTo("{\"name\":\"ok\"}");
     }
+
+    /**
+     * rag_plan.md Stage 4 exemption (`plan.md` §9 2026-07-17): the document-upload endpoint owns
+     * its own, much larger cap via Spring's multipart resolver - this filter's 1MB body-buffering
+     * check must never run for it at all, or a legitimate 2-20MB upload would be rejected before
+     * reaching that endpoint's own logic.
+     */
+    @Test
+    void exemptsTheDocumentUploadEndpointFromTheGlobalLimit() throws Exception {
+        MockHttpServletRequest request =
+                new MockHttpServletRequest(
+                        "POST",
+                        "/api/v1/knowledgebase/" + java.util.UUID.randomUUID() + "/documents");
+        request.setContent(new byte[2048]);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        boolean[] chainCalled = {false};
+        MockFilterChain chain =
+                new MockFilterChain() {
+                    @Override
+                    public void doFilter(ServletRequest req, ServletResponse res) {
+                        chainCalled[0] = true;
+                    }
+                };
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(chainCalled[0])
+                .as("the exempted request must reach the chain, not be rejected at 413")
+                .isTrue();
+    }
+
+    @Test
+    void doesNotExemptAGetRequestToTheSamePathShape() throws Exception {
+        MockHttpServletRequest request =
+                new MockHttpServletRequest(
+                        "GET",
+                        "/api/v1/knowledgebase/" + java.util.UUID.randomUUID() + "/documents");
+        request.setContent(new byte[2048]);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        boolean[] chainCalled = {false};
+        MockFilterChain chain =
+                new MockFilterChain() {
+                    @Override
+                    public void doFilter(ServletRequest req, ServletResponse res) {
+                        chainCalled[0] = true;
+                    }
+                };
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(response.getStatus()).isEqualTo(413);
+        assertThat(chainCalled[0]).isFalse();
+    }
 }

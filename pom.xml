@@ -57,6 +57,17 @@
 			<scope>runtime</scope>
 		</dependency>
 
+		<!-- rag_plan.md Stage 4: MIME content-sniffing only (tika-core's Tika.detect(bytes, filename)) -
+		     never trust the file extension alone. Deliberately tika-core, not the much heavier
+		     tika-parsers bundle - Stage 4 only needs to detect a file's type to accept/reject the
+		     upload, not to extract its content (that's Stage 5's separate DocumentExtractor set, built
+		     on dedicated libraries like PDFBox/POI/jsoup when that stage is implemented). -->
+		<dependency>
+			<groupId>org.apache.tika</groupId>
+			<artifactId>tika-core</artifactId>
+			<version>3.3.1</version>
+		</dependency>
+
 		<dependency>
 			<groupId>org.hibernate.orm</groupId>
 			<artifactId>hibernate-vector</artifactId>
@@ -118,6 +129,93 @@
 			<version>${google-genai.version}</version>
 		</dependency>
 
+		<!-- @SuppressFBWarnings - compile-time only (provided scope keeps it out of the runtime
+		     jar), used to document the one SpotBugs finding that's a real pattern match but already
+		     mitigated by means SpotBugs can't verify statically (see DatabaseBootstrapRunner). -->
+		<dependency>
+			<groupId>com.github.spotbugs</groupId>
+			<artifactId>spotbugs-annotations</artifactId>
+			<version>4.9.3</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<!-- rag_plan.md Stage 5a: OfficeExtractor (Word/Excel/PowerPoint, both legacy binary and
+		     OOXML). poi-scratchpad is required for the legacy .doc/.ppt (HWPF/HSLF) formats - poi/
+		     poi-ooxml alone only cover .docx/.xlsx/.pptx. -->
+		<dependency>
+			<groupId>org.apache.poi</groupId>
+			<artifactId>poi</artifactId>
+			<version>5.5.1</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.poi</groupId>
+			<artifactId>poi-ooxml</artifactId>
+			<version>5.5.1</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.poi</groupId>
+			<artifactId>poi-scratchpad</artifactId>
+			<version>5.5.1</version>
+		</dependency>
+
+		<!-- rag_plan.md Stage 5a: HtmlExtractor. -->
+		<dependency>
+			<groupId>org.jsoup</groupId>
+			<artifactId>jsoup</artifactId>
+			<version>1.22.2</version>
+		</dependency>
+
+		<!-- rag_plan.md Stage 5a: PdfExtractor - PDFRenderer (page rasterization for the LLM-vision
+		     path) and PDFTextStripper (library fallback). Tika (already a dependency) only sniffs
+		     MIME types - it doesn't expose PDFBox's own rendering/text APIs, so this is a direct,
+		     new dependency, verified via javap before use (Loader.loadPDF(byte[]), new
+		     PDFRenderer(document).renderImageWithDPI(page, dpi), new PDFTextStripper().getText(document)). -->
+		<dependency>
+			<groupId>org.apache.pdfbox</groupId>
+			<artifactId>pdfbox</artifactId>
+			<version>3.0.8</version>
+		</dependency>
+
+		<!-- rag_plan.md Stage 5a: ImageExtractor's OCR fallback - a pure-JVM ONNX PP-OCRv4 runtime,
+		     the same risk category already deferred once for the reranker (Grooming #74: no
+		     reference implementation in this environment to verify inference correctness against),
+		     but user-confirmed (asked, not guessed) to build the full plan spec here rather than the
+		     LLM-vision-only alternative. Verified real and functioning via a live smoke test before
+		     adding: a hand-rendered "Golden Retriever" PNG correctly OCR'd via
+		     InferenceEngine.getInstance(Model.ONNX_PPOCR_V4).runOcr(path).getStrRes(). rapidocr-java
+		     (parent POM, not itself a jar) pulls in rapidocr + rapidocr-common; rapidocr-onnx-platform
+		     resolves the correct OS/arch-specific native library + ONNX model-file artifacts
+		     automatically (confirmed: macOS x86_64 resolved cleanly on this dev machine). -->
+		<dependency>
+			<groupId>io.github.mymonstercat</groupId>
+			<artifactId>rapidocr</artifactId>
+			<version>0.0.7</version>
+		</dependency>
+		<dependency>
+			<groupId>io.github.mymonstercat</groupId>
+			<artifactId>rapidocr-onnx-platform</artifactId>
+			<version>0.0.7</version>
+		</dependency>
+
+		<!-- rag_plan.md Stage 5d/6a: LuceneIndexManager - BM25 keyword index, one directory per
+		     knowledge_base. lucene-queryparser is needed for QueryParser (Stage 6a's keyword search
+		     path); included now alongside core/analysis so all three stay version-pinned together. -->
+		<dependency>
+			<groupId>org.apache.lucene</groupId>
+			<artifactId>lucene-core</artifactId>
+			<version>10.5.0</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.lucene</groupId>
+			<artifactId>lucene-analysis-common</artifactId>
+			<version>10.5.0</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.lucene</groupId>
+			<artifactId>lucene-queryparser</artifactId>
+			<version>10.5.0</version>
+		</dependency>
+
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
@@ -128,6 +226,17 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-resttestclient</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- rag_plan.md Stage 6b: RagAnsweringService.askStream returns Flux<ServerSentEvent<String>>
+		     (Spring AI's ChatModel.stream() is reactor-core-based even though this app otherwise runs
+		     plain Spring MVC on Tomcat, not WebFlux - reactor-core itself is already a transitive
+		     dependency via spring-ai). reactor-test's StepVerifier is the standard way to assert on a
+		     Flux's emitted sequence without needing a real HTTP round trip for unit-level tests. -->
+		<dependency>
+			<groupId>io.projectreactor</groupId>
+			<artifactId>reactor-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
@@ -182,6 +291,49 @@
 						<removeUnusedImports/>
 					</java>
 				</configuration>
+			</plugin>
+			<!-- `./mvnw spotbugs:check` - bytecode-based static analysis, a genuinely different bug-
+			     finding method than the manual, angle-by-angle live-testing audits this project has
+			     otherwise relied on (`plan.md` §9, 2026-07-17): systematically checks known bug
+			     patterns (null-deref, resource leaks, unsynchronized access, bad equals/hashCode,
+			     format-string mismatches) across the whole codebase in one pass, rather than requiring
+			     a human to guess which corner to test next. Threshold `Max` (most exhaustive) - this
+			     project has consistently preferred finding more real issues over less audit noise. -->
+			<plugin>
+				<groupId>com.github.spotbugs</groupId>
+				<artifactId>spotbugs-maven-plugin</artifactId>
+				<version>4.9.3.2</version>
+				<configuration>
+					<effort>Max</effort>
+					<threshold>Low</threshold>
+					<excludeFilterFile>spotbugs-exclude.xml</excludeFilterFile>
+				</configuration>
+			</plugin>
+			<!-- rag_plan.md Acceptance Criteria: "≥70% coverage on ingestion, retrieval, and tenant
+			     modules" - never previously measurable, no coverage tool existed in this build. The
+			     agent binds before `test` so it instruments both the surefire (unit) and failsafe
+			     (integration) runs into the same exec file across the `./mvnw clean verify` lifecycle;
+			     `report` is bound to `verify` (after both have run) so the HTML/XML report reflects
+			     combined unit+integration coverage, not unit tests alone. -->
+			<plugin>
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
+				<version>0.8.12</version>
+				<executions>
+					<execution>
+						<id>prepare-agent</id>
+						<goals>
+							<goal>prepare-agent</goal>
+						</goals>
+					</execution>
+					<execution>
+						<id>report</id>
+						<phase>verify</phase>
+						<goals>
+							<goal>report</goal>
+						</goals>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>

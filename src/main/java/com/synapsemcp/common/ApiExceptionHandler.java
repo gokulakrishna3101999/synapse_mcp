@@ -5,17 +5,31 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.ErrorResponse;
+import org.springframework.web.HttpMediaTypeException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestTimeoutException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * Translates exceptions into RFC 7807 problem-details (plan.md §4). Only covers exceptions raised
@@ -128,6 +142,108 @@ public class ApiExceptionHandler {
                         HttpStatus.SERVICE_UNAVAILABLE, "Database temporarily unavailable");
         problemDetail.setTitle("Service Unavailable");
         return problemDetail;
+    }
+
+    /**
+     * A row lock (e.g. {@code KnowledgeBaseService}'s pessimistic tenant-row lock for the
+     * 10-KB-per-tenant race guard) hit Postgres's own {@code lock_timeout} (found live, `plan.md`
+     * §9 2026-07-17: with no explicit bound configured - Postgres's own default is {@code 0},
+     * disabled - a manually-held lock on a tenant row made a concurrent request wait the *entire*
+     * hold duration with no timeout at all; fixed by setting an explicit {@code lock_timeout} via
+     * HikariCP's {@code connection-init-sql}). Distinct from {@link #handleDatabaseUnavailable}:
+     * the database is up and reachable here, just contended by another transaction - a transient,
+     * retry-able condition, not an outage, hence the {@code Retry-After} header.
+     */
+    @ExceptionHandler(CannotAcquireLockException.class)
+    public ResponseEntity<ProblemDetail> handleLockTimeout(CannotAcquireLockException e) {
+        log.warn("Row lock not acquired in time: {}", e.getMessage());
+        ProblemDetail problemDetail =
+                ProblemDetail.forStatusAndDetail(
+                        HttpStatus.SERVICE_UNAVAILABLE,
+                        "Resource temporarily locked by another request, try again shortly");
+        problemDetail.setTitle("Service Unavailable");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, "3")
+                .body(problemDetail);
+    }
+
+    /**
+     * Fires when an entity fetched earlier in the same request (e.g. {@code
+     * KnowledgeBaseService.requireOwnedKnowledgeBase}) is then updated or deleted by primary key
+     * after a <i>different</i> concurrent request has already deleted the same row - Hibernate
+     * checks the affected row count on every UPDATE/DELETE by id regardless of whether the entity
+     * has a {@code @Version} field, and throws this (wrapping {@code StaleObjectStateException})
+     * when it's 0 instead of the expected 1. Found live (audit session, 2026-07-17): firing
+     * concurrent {@code PUT}/{@code DELETE} requests at the same knowledge base reliably produced
+     * unhandled {@code 500}s via exactly this path before this handler existed. Mapped to {@code
+     * 404}, not {@code 409} - confirmed with the user - since the only way this specific exception
+     * fires here is a concurrent delete already removed the row, which is indistinguishable from
+     * "never existed" by the time this response is written, matching the same {@code 404} contract
+     * {@code requireOwnedKnowledgeBase} already uses for that exact case.
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ProblemDetail handleConcurrentDelete(ObjectOptimisticLockingFailureException e) {
+        log.warn("Write raced a concurrent delete of the same resource: {}", e.getMessage());
+        ProblemDetail problemDetail =
+                ProblemDetail.forStatusAndDetail(
+                        HttpStatus.NOT_FOUND, "Resource was deleted by a concurrent request");
+        problemDetail.setTitle("Not Found");
+        return problemDetail;
+    }
+
+    /**
+     * A whole family of Spring MVC framework exceptions self-describe their correct HTTP response
+     * via the {@code ErrorResponse} interface (Framework 6+/7's standard mechanism for this) - but
+     * without an explicit handler here, every one of them is still caught by this class's own
+     * broader {@link #handleUnexpected} first (registered {@code @ExceptionHandler} methods in one
+     * {@code @RestControllerAdvice} take priority over Spring's default {@code ErrorResponse}-aware
+     * resolver), leaking as an unhelpful {@code 500} instead of the status/body the exception
+     * already carries.
+     *
+     * <p>Generalized from a narrower fix for just {@link MaxUploadSizeExceededException} (`plan.md`
+     * §9, earlier same day) after a later audit pass found the same shape of bug live, repeatedly,
+     * across unrelated endpoints - not just Stage 4's new upload path: a missing multipart {@code
+     * "file"} part ({@link MissingServletRequestPartException}, {@code 400}), a wrong {@code
+     * Content-Type} on the upload endpoint ({@link HttpMediaTypeException}, {@code 415}), and a
+     * wrong HTTP method on an ordinary JSON endpoint ({@link
+     * HttpRequestMethodNotSupportedException}, {@code 405}) all `500`d before this generalization.
+     * Rather than add one narrow handler per exception type discovered by accident, every {@code
+     * ErrorResponse}-implementing exception reachable from this app's actual request-handling flow
+     * is listed here, found by scanning every class in {@code spring-web}/{@code spring-webmvc}
+     * implementing that interface, not guessed.
+     *
+     * <p>Deliberately excludes {@link MethodArgumentNotValidException}, which also implements
+     * {@code ErrorResponse} but already has its own more specific handler above with custom
+     * field-error formatting - listing it here too would be a duplicate {@code @ExceptionHandler}
+     * registration for the same type. The method parameter is typed as the {@link ErrorResponse}
+     * interface itself (not {@code Exception}) - Spring resolves the handler by the concrete types
+     * listed in {@code value()}, then binds the actual thrown instance to this common interface,
+     * which every listed type implements by construction.
+     */
+    @ExceptionHandler({
+        HttpMediaTypeException.class,
+        MissingServletRequestPartException.class,
+        MaxUploadSizeExceededException.class,
+        HttpRequestMethodNotSupportedException.class,
+        ServletRequestBindingException.class,
+        NoHandlerFoundException.class,
+        NoResourceFoundException.class,
+        AsyncRequestTimeoutException.class,
+        ResponseStatusException.class
+    })
+    public ResponseEntity<ProblemDetail> handleSelfDescribingSpringMvcException(ErrorResponse e) {
+        log.warn("Spring MVC rejected the request: {}", e.getBody().getDetail());
+        ProblemDetail problemDetail = e.getBody();
+        if (e.getStatusCode().value() == HttpStatus.CONTENT_TOO_LARGE.value()) {
+            // Matches RequestBodySizeLimitFilter's own hardcoded 413 title (that filter runs
+            // outside Spring MVC entirely, so it can't share this handler) - HttpStatus.
+            // CONTENT_TOO_LARGE's own reason phrase ("Content Too Large") would otherwise give the
+            // two 413 paths in this API different titles for the same status.
+            problemDetail.setTitle("Payload Too Large");
+        } else if (problemDetail.getTitle() == null) {
+            problemDetail.setTitle(HttpStatus.valueOf(e.getStatusCode().value()).getReasonPhrase());
+        }
+        return ResponseEntity.status(e.getStatusCode()).body(problemDetail);
     }
 
     @ExceptionHandler(Exception.class)

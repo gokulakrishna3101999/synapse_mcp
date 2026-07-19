@@ -1,0 +1,79 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v4.1.0)
+
+2026-07-19T15:49:43.665+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] com.synapsemcp.SynapsemcpApplication     : Starting SynapsemcpApplication using Java 21.0.11 with PID 53482 (/Users/gokulakrishna/Documents/synapse_mcp/target/classes started by gokulakrishna in /Users/gokulakrishna/Documents/synapse_mcp)
+2026-07-19T15:49:43.668+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] com.synapsemcp.SynapsemcpApplication     : The following 1 profile is active: "local"
+2026-07-19T15:49:44.568+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-07-19T15:49:44.569+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-07-19T15:49:44.757+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 178 ms. Found 8 JPA repository interfaces.
+2026-07-19T15:49:44.805+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-07-19T15:49:44.806+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-07-19T15:49:44.824+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.document.DocumentRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.825+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.ingestion.IngestionJobRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.825+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.knowledgebase.KnowledgeBaseModelConfigRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.825+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.knowledgebase.KnowledgeBaseRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.825+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.rag.chunk.ChunkRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.825+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.tenant.ApiKeyRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.826+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.tenant.ModelConfigRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.826+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.synapsemcp.tenant.TenantRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-07-19T15:49:44.826+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 11 ms. Found 0 Redis repository interfaces.
+2026-07-19T15:49:45.568+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)
+2026-07-19T15:49:45.585+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-07-19T15:49:45.586+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/11.0.22]
+2026-07-19T15:49:45.636+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] b.w.c.s.WebApplicationContextInitializer : Root WebApplicationContext: initialization completed in 1920 ms
+2026-07-19T15:49:45.928+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jpa                    : HHH008540: Processing PersistenceUnitInfo [name: default]
+2026-07-19T15:49:45.984+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.core                   : HHH000001: Hibernate ORM core version 7.4.1.Final
+2026-07-19T15:49:46.244+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-07-19T15:49:46.267+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@3b8b5b40
+2026-07-19T15:49:46.269+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-07-19T15:49:46.337+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://localhost:5432/synapsemcp]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 17.10
+	Default catalog/schema: synapsemcp/public
+	Autocommit mode: undefined/unknown
+	Isolation level: READ_COMMITTED [default READ_COMMITTED]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-07-19T15:49:46.546+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-07-19T15:49:47.934+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.core                   : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-07-19T15:49:48.066+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : HHH000247: ErrorCode: 0, SQLState: 00000
+2026-07-19T15:49:48.067+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : constraint "idx_api_keys_key_hash" of relation "api_keys" does not exist, skipping
+2026-07-19T15:49:48.074+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : HHH000247: ErrorCode: 0, SQLState: 00000
+2026-07-19T15:49:48.074+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : constraint "idx_documents_tenant_kb_content_hash" of relation "documents" does not exist, skipping
+2026-07-19T15:49:48.079+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : HHH000247: ErrorCode: 0, SQLState: 00000
+2026-07-19T15:49:48.079+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : constraint "ukruxxcndi3dvx9u3kdte4d8yu7" of relation "ingestion_jobs" does not exist, skipping
+2026-07-19T15:49:48.083+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : HHH000247: ErrorCode: 0, SQLState: 00000
+2026-07-19T15:49:48.083+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : constraint "ukhcok0p50b6e5su87vd7hfch7f" of relation "knowledge_base_model_configs" does not exist, skipping
+2026-07-19T15:49:48.086+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : HHH000247: ErrorCode: 0, SQLState: 00000
+2026-07-19T15:49:48.086+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] org.hibernate.orm.jdbc.warn              : constraint "ukryx6913g9f1gcqtf9lhx703hj" of relation "model_configs" does not exist, skipping
+2026-07-19T15:49:48.103+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-07-19T15:49:48.189+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.s.d.j.r.query.QueryEnhancerFactories   : Hibernate is in classpath; If applicable, HQL parser will be used.
+2026-07-19T15:49:49.117+05:30  WARN [correlationId=] 53482 --- [synapsemcp] [           main] i.n.r.d.DnsServerAddressStreamProviders  : Can not find io.netty.resolver.dns.macos.MacOSDnsServerAddressStreamProvider in the classpath, fallback to system defaults. This may result in incorrect DNS resolutions on MacOS. Check whether you have a dependency on 'io.netty:netty-resolver-dns-native-macos'
+2026-07-19T15:49:51.039+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.s.b.a.e.web.EndpointLinksResolver      : Exposing 3 endpoints beneath base path '/actuator'
+2026-07-19T15:49:51.179+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] o.s.boot.tomcat.TomcatWebServer          : Tomcat started on port 8080 (http) with context path '/'
+2026-07-19T15:49:51.194+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] com.synapsemcp.SynapsemcpApplication     : Started SynapsemcpApplication in 8.168 seconds (process running for 8.618)
+2026-07-19T15:49:51.321+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [           main] c.s.config.AnnIndexBootstrapRunner       : ANN indexes and CHECK constraints verified
+2026-07-19T15:49:51.686+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [nio-8080-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-07-19T15:49:51.686+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-07-19T15:49:51.688+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 2 ms
+WARNING: A restricted method in java.lang.foreign.Linker has been called
+WARNING: java.lang.foreign.Linker::downcallHandle has been called by the unnamed module
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for this module
+
+2026-07-19T15:51:29.309+05:30  WARN [correlationId=2d12b8a4-87dc-46a2-80aa-05a49734f4ab] 53482 --- [synapsemcp] [    ingestion-1] o.a.l.i.v.VectorizationProvider          : Java vector incubator module is not readable. For optimal vector performance, pass '--add-modules jdk.incubator.vector' to enable Vector API.
+2026-07-19T15:51:35.272+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [ionShutdownHook] o.s.boot.tomcat.GracefulShutdown         : Commencing graceful shutdown. Waiting for active requests to complete
+2026-07-19T15:51:35.277+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [tomcat-shutdown] o.s.boot.tomcat.GracefulShutdown         : Graceful shutdown complete
+2026-07-19T15:51:35.298+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [ionShutdownHook] j.LocalContainerEntityManagerFactoryBean : Closing JPA EntityManagerFactory for persistence unit 'default'
+2026-07-19T15:51:35.301+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [ionShutdownHook] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Shutdown initiated...
+2026-07-19T15:51:35.303+05:30  INFO [correlationId=] 53482 --- [synapsemcp] [ionShutdownHook] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Shutdown completed.

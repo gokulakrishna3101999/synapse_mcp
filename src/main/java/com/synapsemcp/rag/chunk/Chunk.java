@@ -34,7 +34,10 @@ import org.hibernate.type.SqlTypes;
 @Entity
 @Table(
         name = "chunks",
-        indexes = @Index(name = "idx_chunks_tenant_doc", columnList = "tenant_id, document_id"))
+        indexes = {
+            @Index(name = "idx_chunks_tenant_doc", columnList = "tenant_id, document_id"),
+            @Index(name = "idx_chunks_tenant_kb", columnList = "tenant_id, knowledge_base_id")
+        })
 public class Chunk {
 
     @Id
@@ -43,6 +46,19 @@ public class Chunk {
 
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
+
+    /**
+     * Denormalized directly onto {@code chunks}, same rationale as {@code tenant_id} (Grooming #16:
+     * query-filter performance, no FK, integrity enforced at the application layer) - added
+     * specifically so {@code VectorSearchService}'s ANN query can filter by knowledge_base without
+     * joining {@code documents}. Confirmed live via {@code EXPLAIN ANALYZE} (`plan.md` §9
+     * 2026-07-18) that the join was the structural reason Postgres's planner never considered the
+     * HNSW index for the old, joined query - filtering directly on this column is a necessary
+     * (though, depending on real-world selectivity, not always sufficient on its own) precondition
+     * for the planner to pick the index over a sequential scan.
+     */
+    @Column(name = "knowledge_base_id", nullable = false)
+    private UUID knowledgeBaseId;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "document_id", nullable = false)
@@ -99,11 +115,25 @@ public class Chunk {
 
     protected Chunk() {}
 
-    public Chunk(UUID tenantId, Document document, int chunkIndex, String content) {
+    Chunk(UUID tenantId, UUID knowledgeBaseId, Document document, int chunkIndex, String content) {
         this.tenantId = tenantId;
+        this.knowledgeBaseId = knowledgeBaseId;
         this.document = document;
         this.chunkIndex = chunkIndex;
         this.content = content;
+    }
+
+    /**
+     * Public factory replacing the (now package-private) constructor - see {@link
+     * com.synapsemcp.ingestion.IngestionJob#create} for why.
+     */
+    public static Chunk create(
+            UUID tenantId,
+            UUID knowledgeBaseId,
+            Document document,
+            int chunkIndex,
+            String content) {
+        return new Chunk(tenantId, knowledgeBaseId, document, chunkIndex, content);
     }
 
     public UUID getId() {
@@ -114,8 +144,20 @@ public class Chunk {
         return tenantId;
     }
 
-    public Document getDocument() {
+    public UUID getKnowledgeBaseId() {
+        return knowledgeBaseId;
+    }
+
+    Document getDocument() {
         return document;
+    }
+
+    public UUID getDocumentId() {
+        return document.getId();
+    }
+
+    public String getDocumentFilename() {
+        return document.getFilename();
     }
 
     public int getChunkIndex() {
@@ -127,58 +169,63 @@ public class Chunk {
     }
 
     public float[] getEmbedding384() {
-        return embedding384;
+        return embedding384 == null ? null : embedding384.clone();
     }
 
     public void setEmbedding384(float[] embedding384) {
-        this.embedding384 = embedding384;
+        this.embedding384 = embedding384 == null ? null : embedding384.clone();
     }
 
     public float[] getEmbedding512() {
-        return embedding512;
+        return embedding512 == null ? null : embedding512.clone();
     }
 
     public void setEmbedding512(float[] embedding512) {
-        this.embedding512 = embedding512;
+        this.embedding512 = embedding512 == null ? null : embedding512.clone();
     }
 
     public float[] getEmbedding768() {
-        return embedding768;
+        return embedding768 == null ? null : embedding768.clone();
     }
 
     public void setEmbedding768(float[] embedding768) {
-        this.embedding768 = embedding768;
+        this.embedding768 = embedding768 == null ? null : embedding768.clone();
     }
 
     public float[] getEmbedding1024() {
-        return embedding1024;
+        return embedding1024 == null ? null : embedding1024.clone();
     }
 
     public void setEmbedding1024(float[] embedding1024) {
-        this.embedding1024 = embedding1024;
+        this.embedding1024 = embedding1024 == null ? null : embedding1024.clone();
     }
 
     public float[] getEmbedding1536() {
-        return embedding1536;
+        return embedding1536 == null ? null : embedding1536.clone();
     }
 
     public void setEmbedding1536(float[] embedding1536) {
-        this.embedding1536 = embedding1536;
+        this.embedding1536 = embedding1536 == null ? null : embedding1536.clone();
     }
 
     public float[] getEmbedding3072() {
-        return embedding3072;
+        return embedding3072 == null ? null : embedding3072.clone();
     }
 
     public void setEmbedding3072(float[] embedding3072) {
-        this.embedding3072 = embedding3072;
+        this.embedding3072 = embedding3072 == null ? null : embedding3072.clone();
     }
 
+    /**
+     * Returns a defensive copy - {@code ChunkPersistenceService} used to mutate the map returned
+     * here in place (relying on it being the same reference as the internal field); it now builds
+     * its own map and calls {@link #setMetadata} explicitly instead, so this copy is safe.
+     */
     public Map<String, Object> getMetadata() {
-        return metadata;
+        return metadata == null ? null : new HashMap<>(metadata);
     }
 
     public void setMetadata(Map<String, Object> metadata) {
-        this.metadata = metadata;
+        this.metadata = metadata == null ? null : new HashMap<>(metadata);
     }
 }

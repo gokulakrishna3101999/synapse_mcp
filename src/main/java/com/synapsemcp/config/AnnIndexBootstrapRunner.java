@@ -11,8 +11,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * Adds the pgvector HNSW ANN indexes and the {@code CHECK} constraints that plain JPA/{@code
- * ddl-auto} can't express (rag_plan.md Stage 0.5) - runs once Hibernate's own schema step has
+ * Adds the pgvector HNSW ANN indexes, the {@code CHECK} constraints, and the case-insensitive
+ * per-tenant knowledge-base-name uniqueness index that plain JPA/{@code ddl-auto} can't express
+ * (rag_plan.md Stage 0.5 / Stage 3, Grooming #52) - runs once Hibernate's own schema step has
  * completed (normal {@code ApplicationRunner} timing, after all beans including {@code
  * EntityManagerFactory} exist). Runs unconditionally on every startup: every statement is
  * idempotent, so after the first real run this is a fast no-op, and it self-heals if an index or
@@ -58,7 +59,7 @@ public class AnnIndexBootstrapRunner implements ApplicationRunner {
 
     private final JdbcTemplate jdbcTemplate;
 
-    public AnnIndexBootstrapRunner(JdbcTemplate jdbcTemplate) {
+    AnnIndexBootstrapRunner(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
     }
 
@@ -87,6 +88,10 @@ public class AnnIndexBootstrapRunner implements ApplicationRunner {
                 "model_configs",
                 "chk_model_configs_embedding_provider",
                 "embedding_provider IN ('openai','ollama','google-genai')");
+
+        jdbcTemplate.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_bases_tenant_name_ci"
+                        + " ON knowledge_bases (tenant_id, lower(name))");
 
         log.info("ANN indexes and CHECK constraints verified");
     }

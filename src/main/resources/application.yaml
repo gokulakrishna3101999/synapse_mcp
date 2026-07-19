@@ -3,8 +3,44 @@ spring:
     name: synapsemcp
   profiles:
     default: local
+  servlet:
+    multipart:
+      # rag_plan.md Stage 4, Grooming #6a: 20MB single-file cap on document uploads. Verified via
+      # javap (Spring Boot 4.1's org.springframework.boot.servlet.autoconfigure.MultipartProperties)
+      # that the framework default is 1MB per file / 10MB per request - both smaller than the
+      # required cap, so uploads up to 20MB would otherwise be rejected by Spring's own multipart
+      # parsing (a MaxUploadSizeExceededException, before DocumentUploadService's own validation
+      # ever runs) rather than by this app's intended 413 contract. max-request-size is set slightly
+      # above max-file-size to leave headroom for multipart boundary/form-field overhead around a
+      # legitimately-20MB file.
+      max-file-size: 20MB
+      max-request-size: 21MB
+
+logging:
+  pattern:
+    # Spring Boot's officially-supported hook for injecting into the default log line without a
+    # full custom logback-spring.xml. Found live (audit, plan.md §9 2026-07-17): CorrelationIdFilter
+    # populated MDC correctly and the header round-tripped in every response, but the correlation ID
+    # never appeared in a single rendered log line - Spring Boot's default console pattern doesn't
+    # interpolate MDC keys unless told to. The whole point of the filter (Grooming #9: async
+    # ingestion-thread log lines traceable back to the originating request) was silently inert.
+    level: "%5p [correlationId=%X{correlationId:-}]"
 
 management:
+  endpoints:
+    web:
+      exposure:
+        # rag_plan.md Stage 5 / Grooming #8: basic ingestion metrics (jobs-by-state, failure counts)
+        # exposed via /actuator/metrics - user confirmed (`plan.md` §9 2026-07-17), since this app
+        # has no admin tier to gate a richer dashboard behind. health was already exposed by default;
+        # metrics has to be added explicitly (Spring Boot only exposes health over the web by default).
+        # scheduledtasks added separately (Grooming #72, `plan.md` §9 2026-07-18): found live that
+        # IngestionReconciliationJob's cron produces zero log output on a sweep that finds nothing to
+        # repair (the common case in a healthy system) - a silently-broken cron (e.g. an unhandled
+        # exception, or @Scheduled never registering at all) would look identical to a healthy one
+        # from the logs alone. Spring Boot already tracks exactly this per @Scheduled method
+        # (lastExecution status/timestamp, nextExecution) for free - it just wasn't exposed.
+        include: health,metrics,scheduledtasks
   health:
     redis:
       # Redis is a fail-open dependency by design (TenantCreationRateLimitFilter, rag_plan.md Stage 1) -

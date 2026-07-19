@@ -118,10 +118,10 @@ class ModelConfigIntegrationTest extends AbstractIntegrationTest {
         return transactionTemplate.execute(
                 status -> {
                     Tenant tenant = tenantRepository.getReferenceById(tenantId);
-                    KnowledgeBase kb = new KnowledgeBase(tenant, kbName, 1536);
+                    KnowledgeBase kb = KnowledgeBase.create(tenant, kbName, 1536);
                     entityManager.persist(kb);
                     KnowledgeBaseModelConfig kbConfig =
-                            new KnowledgeBaseModelConfig(
+                            KnowledgeBaseModelConfig.create(
                                     kb,
                                     chatProvider,
                                     chatModel,
@@ -236,6 +236,28 @@ class ModelConfigIntegrationTest extends AbstractIntegrationTest {
         ConfigureModelRequest request =
                 new ConfigureModelRequest(
                         "not-a-real-provider", "x", "openai", "text-embedding-3-small", null, null);
+
+        ResponseEntity<ModelConfigResponse> response =
+                put(tenant.tenantId(), tenant.apiKey(), request);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(422);
+    }
+
+    /**
+     * Found live (audit session, 2026-07-17): this environment has a real {@code OPENAI_API_KEY} in
+     * the server process's own environment, and the OpenAI Java SDK silently falls back to it when
+     * a tenant's own credential is blank - reproduced live by configuring exactly this (openai
+     * embedding provider, blank key) and watching a knowledge_base creation succeed using the
+     * server's own key, then fail once that env var was unset. Rejected at write time instead of
+     * only downstream at probe time, so a tenant can never reach the state where the SDK's fallback
+     * could trigger.
+     */
+    @Test
+    void rejectsABlankApiKeyForAProviderThatRequiresOneWith422() {
+        TenantFixture tenant = createTenant("Blank key tenant");
+        ConfigureModelRequest request =
+                new ConfigureModelRequest(
+                        "ollama", "llama3", "openai", "text-embedding-3-small", null, null);
 
         ResponseEntity<ModelConfigResponse> response =
                 put(tenant.tenantId(), tenant.apiKey(), request);

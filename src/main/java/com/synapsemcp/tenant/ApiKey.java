@@ -40,7 +40,7 @@ public class ApiKey {
 
     protected ApiKey() {}
 
-    public ApiKey(Tenant tenant, String keyHash) {
+    ApiKey(Tenant tenant, String keyHash) {
         this.tenant = tenant;
         this.keyHash = keyHash;
     }
@@ -49,8 +49,8 @@ public class ApiKey {
         return id;
     }
 
-    public Tenant getTenant() {
-        return tenant;
+    public UUID getTenantId() {
+        return tenant.getId();
     }
 
     public String getKeyHash() {

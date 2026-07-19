@@ -3,6 +3,7 @@ package com.synapsemcp.common;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -12,6 +13,7 @@ import java.sql.SQLException;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -137,6 +139,93 @@ class ApiExceptionHandlerTest {
                 .andExpect(jsonPath("$.detail").value("Invalid request data"));
     }
 
+    /**
+     * Found live (audit session, 2026-07-17): no Postgres {@code lock_timeout} was configured
+     * anywhere (Postgres's own default is {@code 0}, disabled) - manually held a {@code SELECT ...
+     * FOR UPDATE} lock on a tenant row for 25s and a concurrent knowledge_base creation for that
+     * tenant waited the *entire* duration with no timeout at all, before this handler/the {@code
+     * lock_timeout} fix existed. Distinct from the DB-unavailable case above: the database is up,
+     * just contended - a transient, retry-able condition, hence {@code Retry-After}.
+     */
+    @Test
+    void translatesLockTimeoutTo503WithRetryAfterNotAGeneric500() throws Exception {
+        mockMvc.perform(get("/test/lock-timeout"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.title").value("Service Unavailable"))
+                .andExpect(header().string("Retry-After", "3"));
+    }
+
+    /**
+     * Found live (audit session, 2026-07-17): firing concurrent {@code PUT}/{@code DELETE} requests
+     * at the same knowledge base reliably produced unhandled {@code 500}s - Hibernate checks the
+     * affected row count on every UPDATE/DELETE by id regardless of whether the entity has a
+     * {@code @Version} field, and throws when a concurrent request already deleted the row. Mapped
+     * to {@code 404}, confirmed with the user, since the only way this fires here is the row being
+     * gone by the time this write executes - indistinguishable from "never existed."
+     */
+    @Test
+    void translatesConcurrentDeleteRaceTo404NotAServerError() throws Exception {
+        mockMvc.perform(get("/test/optimistic-lock-failure"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.title").value("Not Found"));
+    }
+
+    /**
+     * rag_plan.md Stage 4: Spring's own multipart resolver enforces {@code
+     * spring.servlet.multipart.max-file-size} before {@code DocumentUploadService} ever runs.
+     * Confirmed via {@code javap} that without this explicit handler, this class's own broader
+     * {@code @ExceptionHandler(Exception.class)} would catch it first (registered handlers in one
+     * {@code @RestControllerAdvice} take priority over Spring's default {@code ErrorResponse}-aware
+     * resolver), leaking as a {@code 500} instead of the {@code 413} the exception itself already
+     * self-describes as. The title override matches {@code RequestBodySizeLimitFilter}'s own
+     * hardcoded {@code 413} wording, not the raw {@code HttpStatus.CONTENT_TOO_LARGE} reason phrase
+     * ("Content Too Large") - both {@code 413} paths in this API should read the same way.
+     */
+    @Test
+    void translatesUploadTooLargeTo413NotAServerError() throws Exception {
+        mockMvc.perform(get("/test/upload-too-large"))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.title").value("Payload Too Large"));
+    }
+
+    /**
+     * Found live (a later, more exhaustive audit pass, same day, `plan.md` §9 2026-07-17) after
+     * generalizing the narrow {@code MaxUploadSizeExceededException}-only fix above to the whole
+     * {@code ErrorResponse} family: this is a real Spring MVC routing failure, not a
+     * hand-constructed exception, confirming the generic handler actually engages for the genuine
+     * framework-thrown case, not just a directly-thrown test double. Confirmed live via curl
+     * against a real running app that this affects every endpoint in the API, not just Stage 4's
+     * upload path.
+     */
+    @Test
+    void translatesWrongHttpMethodTo405NotAServerError() throws Exception {
+        mockMvc.perform(post("/test/type-mismatch/" + UUID.randomUUID()))
+                .andExpect(status().isMethodNotAllowed());
+    }
+
+    /** Same generalization as above - a genuine Spring MVC content-negotiation failure. */
+    @Test
+    void translatesWrongContentTypeTo415NotAServerError() throws Exception {
+        mockMvc.perform(
+                        post("/test/validated")
+                                .contentType(MediaType.TEXT_PLAIN)
+                                .content("irrelevant"))
+                .andExpect(status().isUnsupportedMediaType());
+    }
+
+    /**
+     * Same generalization - a missing required multipart part is the exact scenario found live
+     * against the real Stage 4 upload endpoint (a client omitting the {@code "file"} part
+     * entirely).
+     */
+    @Test
+    void translatesMissingMultipartPartTo400NotAServerError() throws Exception {
+        mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .multipart("/test/multipart"))
+                .andExpect(status().isBadRequest());
+    }
+
     @RestController
     static class TestController {
 
@@ -180,6 +269,30 @@ class ApiExceptionHandlerTest {
                     "too long",
                     new SQLException("value too long for type character varying(255)", "22001"));
         }
+
+        @GetMapping("/test/lock-timeout")
+        void throwLockTimeout() {
+            throw new CannotAcquireLockException(
+                    "could not execute statement",
+                    new SQLException("canceling statement due to lock timeout", "55P03"));
+        }
+
+        @GetMapping("/test/optimistic-lock-failure")
+        void throwOptimisticLockFailure() {
+            throw new org.springframework.orm.ObjectOptimisticLockingFailureException(
+                    "com.synapsemcp.knowledgebase.KnowledgeBase", UUID.randomUUID());
+        }
+
+        @GetMapping("/test/upload-too-large")
+        void throwUploadTooLarge() {
+            throw new org.springframework.web.multipart.MaxUploadSizeExceededException(
+                    20 * 1024 * 1024);
+        }
+
+        @PostMapping("/test/multipart")
+        void requiresAMultipartFile(
+                @org.springframework.web.bind.annotation.RequestParam("file")
+                        org.springframework.web.multipart.MultipartFile file) {}
     }
 
     record TestBody(@NotBlank String name) {}

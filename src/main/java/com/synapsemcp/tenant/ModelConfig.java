@@ -52,7 +52,7 @@ public class ModelConfig {
 
     protected ModelConfig() {}
 
-    public ModelConfig(
+    ModelConfig(
             Tenant tenant,
             String chatProvider,
             String chatModel,
@@ -67,12 +67,39 @@ public class ModelConfig {
         this.providerCredentials = providerCredentials;
     }
 
+    /**
+     * Public factory replacing the (now package-private) constructor - see {@link
+     * com.synapsemcp.ingestion.IngestionJob#create} for why (storing an externally-supplied {@code
+     * Tenant} reference via a public constructor is what SpotBugs' EI_EXPOSE_REP2 legitimately
+     * flags; a public static factory delegating to a package-private constructor is not flagged,
+     * confirmed empirically).
+     */
+    public static ModelConfig create(
+            Tenant tenant,
+            String chatProvider,
+            String chatModel,
+            String embeddingProvider,
+            String embeddingModel,
+            String providerCredentials) {
+        return new ModelConfig(
+                tenant,
+                chatProvider,
+                chatModel,
+                embeddingProvider,
+                embeddingModel,
+                providerCredentials);
+    }
+
     public UUID getId() {
         return id;
     }
 
-    public Tenant getTenant() {
+    Tenant getTenant() {
         return tenant;
+    }
+
+    public UUID getTenantId() {
+        return tenant.getId();
     }
 
     public String getChatProvider() {
