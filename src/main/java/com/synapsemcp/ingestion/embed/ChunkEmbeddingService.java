@@ -1,8 +1,12 @@
 package com.synapsemcp.ingestion.embed;
 
+import com.synapsemcp.common.RateLimitKind;
+import com.synapsemcp.common.RateLimited;
 import com.synapsemcp.common.RedisKeyPrefix;
 import com.synapsemcp.embedding.EmbeddingModelFactory;
 import com.synapsemcp.knowledgebase.KnowledgeBaseModelConfig;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -36,29 +40,42 @@ import org.springframework.stereotype.Service;
  * timeout - purely a performance optimization taking down otherwise-good ingestion. Both the
  * cache-read and cache-write calls now catch and log rather than propagate; a Redis failure simply
  * degrades to "treat as a cache miss" / "skip caching this result", never fails the job.
+ *
+ * <p>{@link RateLimited} (mcp_plan.md Stage 3) wraps the whole method, not just the actual provider
+ * call - a fully-cache-hit invocation still consumes one token from the tenant's embedding budget
+ * even though no real provider cost was incurred. Accepted as a reasonable approximation: each
+ * invocation is already one logical embedding-batch operation (potentially many chunks' worth of
+ * texts in one call), so per-invocation accounting is a defensible proxy for the real
+ * cost-incurring granularity, not a correctness concern - at worst a cache-hit-heavy caller burns
+ * quota slightly faster than their real provider spend would justify.
  */
 @Service
 public class ChunkEmbeddingService {
 
     private static final Logger log = LoggerFactory.getLogger(ChunkEmbeddingService.class);
     private static final Duration CACHE_TTL = Duration.ofDays(7);
+    private static final String CACHE_METRIC = "synapsemcp.embedding.cache";
 
     private final EmbeddingModelFactory embeddingModelFactory;
     private final StringRedisTemplate redisTemplate;
     private final RedisKeyPrefix redisKeyPrefix;
+    private final MeterRegistry meterRegistry;
 
     ChunkEmbeddingService(
             EmbeddingModelFactory embeddingModelFactory,
             StringRedisTemplate redisTemplate,
-            RedisKeyPrefix redisKeyPrefix) {
+            RedisKeyPrefix redisKeyPrefix,
+            MeterRegistry meterRegistry) {
         this.embeddingModelFactory = embeddingModelFactory;
         this.redisTemplate = redisTemplate;
         this.redisKeyPrefix = redisKeyPrefix;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
      * @return embeddings in the same order as {@code texts}.
      */
+    @RateLimited(RateLimitKind.EMBEDDING)
     public List<float[]> embed(KnowledgeBaseModelConfig kbConfig, List<String> texts) {
         if (texts.isEmpty()) {
             return List.of();
@@ -82,9 +99,11 @@ public class ChunkEmbeddingService {
             String cached = cachedValues == null ? null : cachedValues.get(i);
             if (cached != null) {
                 results[i] = deserialize(cached);
+                recordCacheResult("hit");
             } else {
                 missIndices.add(i);
                 missTexts.add(texts.get(i));
+                recordCacheResult("miss");
             }
         }
 
@@ -101,6 +120,14 @@ public class ChunkEmbeddingService {
         }
 
         return Arrays.asList(results);
+    }
+
+    private void recordCacheResult(String result) {
+        Counter.builder(CACHE_METRIC)
+                .tag("result", result)
+                .description("Embedding cache hit/miss count, per text embedded")
+                .register(meterRegistry)
+                .increment();
     }
 
     private List<String> safeMultiGet(List<String> cacheKeys) {

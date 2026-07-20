@@ -1,6 +1,8 @@
 package com.synapsemcp.rag.retrieve;
 
 import com.synapsemcp.chat.ChatModelFactory;
+import com.synapsemcp.common.RateLimitKind;
+import com.synapsemcp.common.RateLimited;
 import com.synapsemcp.knowledgebase.KnowledgeBaseModelConfig;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -35,7 +37,13 @@ import org.springframework.stereotype.Service;
  * - reranking is an optional precision enhancement (rag_plan.md: "Reranking is optional and can be
  * disabled via a request parameter"), not a correctness requirement, so a broken reranker degrading
  * to "no reranking happened" is the right failure mode, matching this project's established Redis
- * fail-open philosophy applied to a different dependency.
+ * fail-open philosophy applied to a different dependency. This does <b>not</b> extend to the
+ * tenant's own {@link RateLimited} chat-call budget being exhausted (mcp_plan.md Stage 3, confirmed
+ * via {@code AskUserQuestion}): a rate-limit denial is thrown by {@code RateLimitAspect} from
+ * outside this method's own try/catch, surfacing as a clear {@code 429}/{@code Retry-After} on
+ * {@code search}/{@code ask} rather than silently skipping reranking - a caller who wants to avoid
+ * this can pass {@code rerank=false} to stay on vector/keyword-only retrieval, which never touches
+ * a chat provider at all.
  *
  * <p>No live chat provider is available in this environment (recurring blocker, every stage) - the
  * response-parsing regex is deliberately lenient (tolerates an optional "Passage"/"Source" prefix
@@ -69,6 +77,7 @@ public class LlmRerankerService {
      *     list (same order, original retrieval scores) if reranking fails or returns nothing
      *     parseable.
      */
+    @RateLimited(RateLimitKind.CHAT)
     public List<SearchResultChunk> rerank(
             KnowledgeBaseModelConfig kbConfig, String query, List<SearchResultChunk> candidates) {
         if (candidates.size() <= 1) {

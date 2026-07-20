@@ -4,9 +4,8 @@
 #
 # Distinct from scripts/setup-environment.sh (referenced in plan.md/rag_plan.md as a narrower
 # "install services + reset synapsemcp/synapsemcp_test to an empty clean slate" tool) - this script
-# is a superset: it also starts the app, verifies real connectivity (Postgres/Redis/Lucene/pgvector
-# *and* the tenant's configured chat/embedding models), and creates a first tenant + knowledge base
-# through the running API. Safe to re-run; every destructive step asks for confirmation first.
+# is a superset: it also starts the app and verifies real connectivity (Postgres/Redis/Lucene/
+# pgvector). Safe to re-run; every destructive step asks for confirmation first.
 #
 # Usage:
 #   ./scripts/init-environment.sh
@@ -55,14 +54,13 @@ confirm() { # confirm "prompt" -> returns 0 for yes
   [[ "$answer" =~ ^[Yy]$ ]]
 }
 
-# ── State tracked for rollback (Step 7) ───────────────────────────────────────
+# ── State tracked for rollback (Step 6) ────────────────────────────────────────
 STEP_NAME="startup"
 APP_PID=""
 APP_STARTED_BY_SCRIPT=false
 MAIN_DB_EXISTED=false
 TEST_DB_EXISTED=false
 CLEANUP_DONE=false
-TENANT_ID=""
 FAILED=false
 
 on_exit() {
@@ -126,17 +124,6 @@ rollback() {
   step "Rolling back"
   stop_app_if_running
 
-  if [ -n "$TENANT_ID" ]; then
-    info "Removing the tenant this run partially created (id: $TENANT_ID) - no DELETE endpoint"
-    info "exists for tenants, so this goes directly through the database, same as its own FK cascade order."
-    PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d synapsemcp -v ON_ERROR_STOP=0 <<SQL >/dev/null 2>&1 || true
-DELETE FROM api_keys WHERE tenant_id = '$TENANT_ID';
-DELETE FROM model_configs WHERE tenant_id = '$TENANT_ID';
-DELETE FROM knowledge_bases WHERE tenant_id = '$TENANT_ID';
-DELETE FROM tenants WHERE id = '$TENANT_ID';
-SQL
-  fi
-
   if [ "$CLEANUP_DONE" = true ]; then
     restore_database "synapsemcp" "$MAIN_DB_EXISTED"
     restore_database "synapsemcp_test" "$TEST_DB_EXISTED"
@@ -164,13 +151,12 @@ require_cmd() {
 step "SynapseMCP Initialization Wizard"
 # ══════════════════════════════════════════════════════════════════════════
 echo "This will (1) collect environment configuration, (2) validate dependencies,"
-echo "(3) destructively reset the local + test databases/caches, (4) start the app and verify"
-echo "connectivity (including your chat/embedding provider), and (5) create a test tenant,"
-echo "knowledge base, and model config. Every destructive step asks for confirmation first."
+echo "(3) destructively reset the local + test databases/caches, and (4) start the app and verify"
+echo "connectivity. Every destructive step asks for confirmation first."
 
 # ── Step 1: Environment Setup ────────────────────────────────────────────────
 STEP_NAME="environment setup"
-step "Step 1/7: Environment Setup"
+step "Step 1/6: Environment Setup"
 echo "Which profile is this for?"
 echo "  1) local (default)"
 echo "  2) dev"
@@ -229,7 +215,7 @@ success "Environment collected."
 
 # ── Step 2: Dependency Validation ────────────────────────────────────────────
 STEP_NAME="dependency validation"
-step "Step 2/7: Dependency Validation"
+step "Step 2/6: Dependency Validation"
 
 DEPS_OK=true
 require_cmd psql       "Install the PostgreSQL client (macOS: brew install postgresql@17 · Debian/Ubuntu: sudo apt install postgresql-client)" || DEPS_OK=false
@@ -270,9 +256,33 @@ if [ "$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null)" != "PONG"
 fi
 success "Redis is reachable."
 
+# This wizard always starts the app on port 8080 and verifies it there (Step 4) - it never
+# parameterizes the port. Checked here, before Step 3's destructive reset, rather than left to
+# surface as a confusing failure later: if a *different*, already-running process (e.g. your own
+# separately-running SynapseMCP instance, or anything else) is already listening on 8080, Step 4's
+# health check would get a real "UP" response from that unrelated process almost instantly and
+# never notice its own freshly-started instance failed to bind at all - silently verifying and
+# seeding tenant/model-config/knowledge_base data against the wrong target while reporting success,
+# rather than against the databases this run just reset. (A same-database conflict is already
+# caught earlier and loudly, by `dropdb` refusing to drop a database with active connections - this
+# check is for the narrower, silent case where the other process uses a different database but the
+# same port.)
+info "Checking that port 8080 is free (the app always binds here)..."
+# The connection test below runs entirely inside its own subshell (the parentheses) - fd 3 is
+# opened and closed there automatically when the subshell exits - so there is nothing to clean up
+# in this shell afterward. Do NOT add an `exec 3<&- ...` cleanup line here: `exec` with no command
+# applies its redirections to the *current shell permanently*, not just to itself - an earlier
+# version of this check did exactly that with a trailing `2>/dev/null` on such a line, which
+# silently redirected this whole script's stderr to /dev/null for the rest of the run, hiding every
+# subsequent `fail`/`error` message. Found live, not guessed - caught before this shipped.
+if (exec 3<>/dev/tcp/localhost/8080) 2>/dev/null; then
+  fail "Port 8080 is already in use by another process. Stop whatever is listening there (e.g. your own already-running SynapseMCP instance) and re-run - otherwise this wizard cannot tell its own freshly-started instance apart from whatever already answers on that port."
+fi
+success "Port 8080 is free."
+
 # ── Step 3: Cleanup ───────────────────────────────────────────────────────────
 STEP_NAME="cleanup"
-step "Step 3/7: Cleanup"
+step "Step 3/6: Cleanup"
 echo "This will DESTRUCTIVELY reset (no backup is taken - this cannot be undone):"
 echo "  - Postgres databases 'synapsemcp' and 'synapsemcp_test' (dropped and recreated empty)"
 echo "  - pgvector data (it lives inside those databases, so this is the same action)"
@@ -322,7 +332,7 @@ success "Lucene index directory cleared and confirmed writable."
 
 # ── Step 4: Verification and Connectivity ────────────────────────────────────
 STEP_NAME="starting the application"
-step "Step 4/7: Start the Application & Verify Connectivity"
+step "Step 4/6: Start the Application & Verify Connectivity"
 info "Starting the application on profile '$PROFILE' (this may take a little while on first boot)..."
 (cd "$PROJECT_ROOT" && ./mvnw -q spring-boot:run "-Dspring-boot.run.profiles=$PROFILE" > "$APP_LOG" 2>&1 &
  echo $! > "$TMP_DIR/app.pid")
@@ -367,115 +377,20 @@ if [ "$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null)" != "PONG"
 fi
 success "Redis connectivity confirmed."
 info "Lucene needs no server of its own - its base directory was already confirmed writable above;"
-info "a real per-knowledge_base index directory will be created under it once a document is ingested below."
+info "a real per-knowledge_base index directory will be created under it once a document is ingested."
 
-# ── Step 5: Initial Configuration (also verifies chat/embedding connectivity) ─
-STEP_NAME="initial configuration"
-step "Step 5/7: Initial Configuration"
-echo "This step also completes Step 4's requirement to verify the chat/embedding models are"
-echo "connected and functioning - there is no separate 'test connection' endpoint, so the proof is"
-echo "a real knowledge_base creation (embeds a live probe string) and a real ask (a live chat call)."
-
-TENANT_NAME=$(ask "Test tenant name" "Test Tenant")
-TENANT_RESP=$(curl -s -w '\n%{http_code}' -X POST http://localhost:8080/api/v1/tenants \
-  -H "Content-Type: application/json" -d "$(jq -n --arg name "$TENANT_NAME" '{name:$name}')")
-TENANT_HTTP=$(echo "$TENANT_RESP" | tail -1)
-TENANT_BODY=$(echo "$TENANT_RESP" | sed '$d')
-[ "$TENANT_HTTP" = "201" ] || fail "Tenant creation failed (HTTP $TENANT_HTTP): $TENANT_BODY"
-TENANT_ID=$(echo "$TENANT_BODY" | jq -r '.tenantId')
-TENANT_API_KEY=$(echo "$TENANT_BODY" | jq -r '.apiKey')
-success "Tenant created: $TENANT_ID"
-
-echo
-echo "Chat provider options: openai, anthropic, ollama, google-genai"
-CHAT_PROVIDER=$(ask "Chat provider" "openai")
-CHAT_MODEL=$(ask "Chat model name" "gpt-4o")
-echo "Embedding provider options: openai, ollama, google-genai (no anthropic - it has no embeddings API)"
-EMBEDDING_PROVIDER=$(ask "Embedding provider" "openai")
-EMBEDDING_MODEL=$(ask "Embedding model name" "text-embedding-3-small")
-
-CHAT_API_KEY=""
-if [ "$CHAT_PROVIDER" != "ollama" ]; then
-  CHAT_API_KEY=$(ask_secret "Chat API key (required for $CHAT_PROVIDER)")
-fi
-EMBEDDING_API_KEY=""
-if [ "$EMBEDDING_PROVIDER" != "ollama" ]; then
-  EMBEDDING_API_KEY=$(ask_secret "Embedding API key (required for $EMBEDDING_PROVIDER)")
-fi
-
-MODEL_CFG_BODY=$(jq -n \
-  --arg cp "$CHAT_PROVIDER" --arg cm "$CHAT_MODEL" --arg ep "$EMBEDDING_PROVIDER" --arg em "$EMBEDDING_MODEL" \
-  --arg cak "$CHAT_API_KEY" --arg eak "$EMBEDDING_API_KEY" \
-  '{chatProvider:$cp, chatModel:$cm, embeddingProvider:$ep, embeddingModel:$em, chatApiKey:$cak, embeddingApiKey:$eak}')
-MODEL_CFG_RESP=$(curl -s -w '\n%{http_code}' -X PUT "http://localhost:8080/api/v1/tenants/$TENANT_ID/model-config" \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $TENANT_API_KEY" -d "$MODEL_CFG_BODY")
-MODEL_CFG_HTTP=$(echo "$MODEL_CFG_RESP" | tail -1)
-[ "$MODEL_CFG_HTTP" = "200" ] || fail "Model configuration failed (HTTP $MODEL_CFG_HTTP): $(echo "$MODEL_CFG_RESP" | sed '$d')"
-success "Model configuration saved."
-
-KB_NAME=$(ask "Knowledge base name" "test-kb")
-KB_RESP=$(curl -s -w '\n%{http_code}' -X POST http://localhost:8080/api/v1/knowledgebase \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $TENANT_API_KEY" \
-  -d "$(jq -n --arg name "$KB_NAME" '{name:$name}')")
-KB_HTTP=$(echo "$KB_RESP" | tail -1)
-KB_BODY=$(echo "$KB_RESP" | sed '$d')
-if [ "$KB_HTTP" != "201" ]; then
-  fail "Knowledge base creation failed (HTTP $KB_HTTP): $KB_BODY - this is the live embedding-model probe, so this most likely means the embedding provider/model/credentials aren't working."
-fi
-KB_ID=$(echo "$KB_BODY" | jq -r '.id')
-KB_DIM=$(echo "$KB_BODY" | jq -r '.embeddingDim')
-success "Knowledge base created (id: $KB_ID, embedding_dim: $KB_DIM) - embedding model confirmed connected and functioning."
-
-TEST_DOC_CONTENT=$(ask "Content for a small test document" "SynapseMCP is a multi-tenant retrieval-augmented generation platform.")
-TEST_DOC_FILE="$TMP_DIR/test-document.txt"
-printf '%s\n' "$TEST_DOC_CONTENT" > "$TEST_DOC_FILE"
-UPLOAD_RESP=$(curl -s -w '\n%{http_code}' -X POST "http://localhost:8080/api/v1/knowledgebase/$KB_ID/documents" \
-  -H "Authorization: Bearer $TENANT_API_KEY" -F "file=@$TEST_DOC_FILE;type=text/plain")
-UPLOAD_HTTP=$(echo "$UPLOAD_RESP" | tail -1)
-UPLOAD_BODY=$(echo "$UPLOAD_RESP" | sed '$d')
-[[ "$UPLOAD_HTTP" =~ ^(200|202)$ ]] || fail "Test document upload failed (HTTP $UPLOAD_HTTP): $UPLOAD_BODY"
-JOB_ID=$(echo "$UPLOAD_BODY" | jq -r '.jobId')
-
-info "Waiting for ingestion to complete (up to 60s - this re-exercises the embedding model)..."
-JOB_STATUS="PENDING"
-for _ in $(seq 1 60); do
-  JOB_STATUS=$(curl -s "http://localhost:8080/api/v1/jobs/$JOB_ID" -H "Authorization: Bearer $TENANT_API_KEY" | jq -r '.status')
-  [[ "$JOB_STATUS" == "READY" || "$JOB_STATUS" == "FAILED" ]] && break
-  sleep 1
-done
-if [ "$JOB_STATUS" != "READY" ]; then
-  ERROR_DETAIL=$(curl -s "http://localhost:8080/api/v1/jobs/$JOB_ID" -H "Authorization: Bearer $TENANT_API_KEY" | jq -r '.errorDetail')
-  fail "Test document ingestion did not reach READY (status: $JOB_STATUS, detail: $ERROR_DETAIL)."
-fi
-success "Test document ingested successfully - embedding model re-confirmed, and a real Lucene index now exists under $SYNAPSEMCP_LUCENE_BASE_DIR/$KB_ID."
-
-TEST_QUESTION=$(ask "A test question to ask against the document" "What is SynapseMCP?")
-ASK_RESP=$(curl -s -w '\n%{http_code}' -X POST "http://localhost:8080/api/v1/knowledgebase/$KB_ID/ask" \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $TENANT_API_KEY" \
-  -d "$(jq -n --arg q "$TEST_QUESTION" '{question:$q}')")
-ASK_HTTP=$(echo "$ASK_RESP" | tail -1)
-ASK_BODY=$(echo "$ASK_RESP" | sed '$d')
-[ "$ASK_HTTP" = "200" ] || fail "Test question failed (HTTP $ASK_HTTP): $ASK_BODY - this is the live chat-model call, so this most likely means the chat provider/model/credentials aren't working."
-ANSWER=$(echo "$ASK_BODY" | jq -r '.answer')
-[ -n "$ANSWER" ] && [ "$ANSWER" != "null" ] || fail "The chat model returned an empty answer."
-success "Chat model confirmed connected and functioning. Answer: \"$ANSWER\""
-
-# ── Step 6: Finalization ──────────────────────────────────────────────────────
+# ── Step 5: Finalization ──────────────────────────────────────────────────────
 STEP_NAME="finalization"
-step "Step 6/7: Finalization"
+step "Step 5/6: Finalization"
 stop_app_if_running
 APP_STARTED_BY_SCRIPT=false
 success "Application stopped."
 
-# ── Step 7 note: nothing to roll back on this path - we succeeded. ───────────
-step "Step 7/7: Done"
+# ── Step 6 note: nothing to roll back on this path - we succeeded. ───────────
+step "Step 6/6: Done"
 cat <<SUMMARY
 
 ${C_GREEN}Initialization complete.${C_RESET}
-
-Tenant id:        $TENANT_ID
-Tenant API key:   $TENANT_API_KEY   ${C_YELLOW}(shown once - save it now)${C_RESET}
-Knowledge base:   $KB_ID  ($KB_NAME, embedding_dim=$KB_DIM)
 
 You can now start the application yourself:
 
@@ -486,5 +401,6 @@ You can now start the application yourself:
   export REDIS_PORT="$REDIS_PORT"
   cd "$PROJECT_ROOT" && ./mvnw spring-boot:run -Dspring-boot.run.profiles=$PROFILE
 
-The tenant, model configuration, and knowledge base created above are already there waiting for you.
+Once it's running, create a tenant, configure a model, and create a knowledge base via the REST
+API or an MCP client - see scripts/instructions.md for a full walkthrough.
 SUMMARY

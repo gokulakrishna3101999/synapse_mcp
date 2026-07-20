@@ -136,6 +136,33 @@ class RequestBodySizeLimitFilterTest {
                 .isTrue();
     }
 
+    /**
+     * mcp_plan.md Stage 2, Grooming #19: the {@code ingest} tool's Base64-encoded {@code
+     * content_base64} shape has no multipart resolver to stream/cap it, so {@code /mcp} is exempted
+     * from this filter's 1MB default the same way the document-upload endpoint is - {@code
+     * IngestMcpTool} enforces its own explicit cap instead.
+     */
+    @Test
+    void exemptsTheMcpTransportEndpointFromTheGlobalLimit() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/mcp");
+        request.setContent(new byte[2048]);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        boolean[] chainCalled = {false};
+        MockFilterChain chain =
+                new MockFilterChain() {
+                    @Override
+                    public void doFilter(ServletRequest req, ServletResponse res) {
+                        chainCalled[0] = true;
+                    }
+                };
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(chainCalled[0])
+                .as("the exempted request must reach the chain, not be rejected at 413")
+                .isTrue();
+    }
+
     @Test
     void doesNotExemptAGetRequestToTheSamePathShape() throws Exception {
         MockHttpServletRequest request =

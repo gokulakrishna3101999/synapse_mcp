@@ -1,6 +1,8 @@
 package com.synapsemcp.ingestion.extract;
 
 import com.synapsemcp.chat.ChatModelFactory;
+import com.synapsemcp.common.RateLimitKind;
+import com.synapsemcp.common.RateLimited;
 import com.synapsemcp.knowledgebase.KnowledgeBaseModelConfig;
 import java.util.List;
 import org.springframework.ai.chat.messages.Message;
@@ -44,6 +46,7 @@ public class VisionTranscriptionService {
      * @param pngImages one or more images, each already encoded as PNG bytes.
      * @return the model's raw transcribed text (never null, may be blank).
      */
+    @RateLimited(RateLimitKind.CHAT)
     public String transcribe(
             KnowledgeBaseModelConfig kbConfig, String instruction, List<byte[]> pngImages) {
         ChatModel chatModel = chatModelFactory.getChatModelForKnowledgeBase(kbConfig);

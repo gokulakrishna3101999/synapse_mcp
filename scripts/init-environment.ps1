@@ -6,13 +6,11 @@
 .DESCRIPTION
     Distinct from scripts/setup-environment.ps1 (referenced in plan.md/rag_plan.md as a narrower
     "install services + reset synapsemcp/synapsemcp_test to an empty clean slate" tool) - this
-    script is a superset: it also starts the app, verifies real connectivity (PostgreSQL/Redis/
-    Lucene/pgvector *and* the tenant's configured chat/embedding models), and creates a test
-    tenant, knowledge base, and model config through the running API. Safe to re-run; every
-    destructive step asks for confirmation first.
+    script is a superset: it also starts the app and verifies real connectivity (PostgreSQL/Redis/
+    Lucene/pgvector). Safe to re-run; every destructive step asks for confirmation first.
 
-    Requires PowerShell 7.1+ (for Invoke-RestMethod -Form multipart uploads), psql/dropdb/createdb
-    on PATH, redis-cli on PATH, Java 21+, and the committed mvnw.cmd.
+    Requires PowerShell 7.1+, psql/dropdb/createdb on PATH, redis-cli on PATH, Java 21+, and the
+    committed mvnw.cmd.
 
 .EXAMPLE
     ./scripts/init-environment.ps1
@@ -24,8 +22,6 @@ $ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot  = Split-Path -Parent $ScriptDir
 $AppLog       = Join-Path $ProjectRoot "init-environment-app.log"
 $AppErrLog    = "${AppLog}.err"
-$TmpDir       = Join-Path ([System.IO.Path]::GetTempPath()) ("synapsemcp-init-" + [guid]::NewGuid())
-New-Item -ItemType Directory -Path $TmpDir | Out-Null
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 function Write-Info    { param($Message) Write-Host "[INFO]  $Message" -ForegroundColor Cyan }
@@ -61,13 +57,12 @@ function Confirm-Action {
     return $answer -match '^[Yy]$'
 }
 
-# ── State tracked for rollback (Step 7) ────────────────────────────────────────
+# ── State tracked for rollback (Step 5) ────────────────────────────────────────
 $script:StepName       = "startup"
 $script:AppProcess     = $null
 $script:MainDbExisted  = $false
 $script:TestDbExisted  = $false
 $script:CleanupDone    = $false
-$script:TenantId       = $null
 $script:Failed         = $false
 
 function Stop-AppIfRunning {
@@ -83,21 +78,6 @@ function Stop-AppIfRunning {
 function Invoke-Rollback {
     Write-Step "Rolling back"
     Stop-AppIfRunning
-
-    if ($script:TenantId) {
-        Write-Info "Removing the tenant this run partially created (id: $($script:TenantId)) - no DELETE"
-        Write-Info "endpoint exists for tenants, so this goes directly through the database."
-        $sql = @"
-DELETE FROM api_keys WHERE tenant_id = '$($script:TenantId)';
-DELETE FROM model_configs WHERE tenant_id = '$($script:TenantId)';
-DELETE FROM knowledge_bases WHERE tenant_id = '$($script:TenantId)';
-DELETE FROM tenants WHERE id = '$($script:TenantId)';
-"@
-        try {
-            $env:PGPASSWORD = $DbPassword
-            $sql | psql -h $DbHost -p $DbPort -U $DbUsername -d synapsemcp -v ON_ERROR_STOP=0 2>$null | Out-Null
-        } catch {}
-    }
 
     if ($script:CleanupDone) {
         Restore-Database "synapsemcp" $script:MainDbExisted
@@ -131,44 +111,17 @@ function Test-RequiredCommand {
     return $true
 }
 
-function Invoke-Api {
-    # Wrapper around Invoke-WebRequest that never throws on non-2xx - returns @{ Status; Body }
-    # ContentType "multipart/form-data" is a dispatch sentinel here (routes to -Form), not a literal
-    # header value - Invoke-WebRequest -Form sets its own multipart boundary and ignores -ContentType.
-    param([string]$Method, [string]$Uri, [hashtable]$Headers = @{}, $Body = $null, [string]$ContentType = "application/json")
-    try {
-        if ($ContentType -eq "multipart/form-data") {
-            $resp = Invoke-WebRequest -Method $Method -Uri $Uri -Headers $Headers -Form $Body -SkipHttpErrorCheck
-        } elseif ($Body -ne $null) {
-            $resp = Invoke-WebRequest -Method $Method -Uri $Uri -Headers $Headers -Body $Body -ContentType $ContentType -SkipHttpErrorCheck
-        } else {
-            $resp = Invoke-WebRequest -Method $Method -Uri $Uri -Headers $Headers -SkipHttpErrorCheck
-        }
-        return @{ Status = [int]$resp.StatusCode; Body = $resp.Content }
-    } catch {
-        # Older PowerShell without -SkipHttpErrorCheck support falls back here.
-        if ($_.Exception.Response) {
-            $status = [int]$_.Exception.Response.StatusCode
-            $stream = $_.Exception.Response.GetResponseStream()
-            $reader = New-Object System.IO.StreamReader($stream)
-            return @{ Status = $status; Body = $reader.ReadToEnd() }
-        }
-        return @{ Status = 0; Body = $_.Exception.Message }
-    }
-}
-
 try {
     # ══════════════════════════════════════════════════════════════════════
     Write-Step "SynapseMCP Initialization Wizard"
     # ══════════════════════════════════════════════════════════════════════
     Write-Host "This will (1) collect environment configuration, (2) validate dependencies,"
-    Write-Host "(3) destructively reset the local + test databases/caches, (4) start the app and verify"
-    Write-Host "connectivity (including your chat/embedding provider), and (5) create a test tenant,"
-    Write-Host "knowledge base, and model config. Every destructive step asks for confirmation first."
+    Write-Host "(3) destructively reset the local + test databases/caches, and (4) start the app and"
+    Write-Host "verify connectivity. Every destructive step asks for confirmation first."
 
     # ── Step 1: Environment Setup ────────────────────────────────────────────
     $script:StepName = "environment setup"
-    Write-Step "Step 1/7: Environment Setup"
+    Write-Step "Step 1/6: Environment Setup"
     Write-Host "Which profile is this for?"
     Write-Host "  1) local (default)"
     Write-Host "  2) dev"
@@ -227,7 +180,7 @@ try {
 
     # ── Step 2: Dependency Validation ────────────────────────────────────────
     $script:StepName = "dependency validation"
-    Write-Step "Step 2/7: Dependency Validation"
+    Write-Step "Step 2/6: Dependency Validation"
 
     $depsOk = $true
     $depsOk = (Test-RequiredCommand "psql" "Install the PostgreSQL client tools and add them to PATH.") -and $depsOk
@@ -269,9 +222,37 @@ try {
     if ($redisPing -ne "PONG") { Fail "Could not reach Redis at ${RedisHost}:${RedisPort}. Is the server running?" }
     Write-Success "Redis is reachable."
 
+    # This wizard always starts the app on port 8080 and verifies it there (Step 4) - it never
+    # parameterizes the port. Checked here, before Step 3's destructive reset, rather than left to
+    # surface as a confusing failure later: if a *different*, already-running process is already
+    # listening on 8080, Step 4's health check would get a real "UP" response from that unrelated
+    # process almost instantly and never notice its own freshly-started instance failed to bind at
+    # all - silently verifying and seeding tenant/model-config/knowledge_base data against the wrong
+    # target while reporting success, rather than against the databases this run just reset. (A
+    # same-database conflict is already caught earlier and loudly, by dropdb refusing to drop a
+    # database with active connections - this check is for the narrower, silent case where the
+    # other process uses a different database but the same port.)
+    Write-Info "Checking that port 8080 is free (the app always binds here)..."
+    $portInUse = $false
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $connectTask = $tcpClient.ConnectAsync("localhost", 8080)
+        if ($connectTask.Wait(500) -and $tcpClient.Connected) {
+            $portInUse = $true
+        }
+    } catch {
+        $portInUse = $false
+    } finally {
+        $tcpClient.Close()
+    }
+    if ($portInUse) {
+        Fail "Port 8080 is already in use by another process. Stop whatever is listening there (e.g. your own already-running SynapseMCP instance) and re-run - otherwise this wizard cannot tell its own freshly-started instance apart from whatever already answers on that port."
+    }
+    Write-Success "Port 8080 is free."
+
     # ── Step 3: Cleanup ───────────────────────────────────────────────────────
     $script:StepName = "cleanup"
-    Write-Step "Step 3/7: Cleanup"
+    Write-Step "Step 3/6: Cleanup"
     Write-Host "This will DESTRUCTIVELY reset (no backup is taken - this cannot be undone):"
     Write-Host "  - Postgres databases 'synapsemcp' and 'synapsemcp_test' (dropped and recreated empty)"
     Write-Host "  - pgvector data (it lives inside those databases, so this is the same action)"
@@ -330,7 +311,7 @@ try {
 
     # ── Step 4: Verification and Connectivity ────────────────────────────────
     $script:StepName = "starting the application"
-    Write-Step "Step 4/7: Start the Application & Verify Connectivity"
+    Write-Step "Step 4/6: Start the Application & Verify Connectivity"
     Write-Info "Starting the application on profile '$AppProfile' (this may take a little while on first boot)..."
     # Process.Start with UseShellExecute=false (what -NoNewWindow/-RedirectStandardOutput require)
     # cannot launch a .cmd directly - CreateProcess doesn't know how to run a batch file as an
@@ -374,104 +355,18 @@ try {
     if ($redisPing2 -ne "PONG") { Fail "Redis became unreachable after app startup." }
     Write-Success "Redis connectivity confirmed."
     Write-Info "Lucene needs no server of its own - its base directory was already confirmed writable above;"
-    Write-Info "a real per-knowledge_base index directory will be created under it once a document is ingested below."
+    Write-Info "a real per-knowledge_base index directory will be created under it once a document is ingested."
 
-    # ── Step 5: Initial Configuration (also verifies chat/embedding connectivity) ─
-    $script:StepName = "initial configuration"
-    Write-Step "Step 5/7: Initial Configuration"
-    Write-Host "This step also completes Step 4's requirement to verify the chat/embedding models are"
-    Write-Host "connected and functioning - there is no separate 'test connection' endpoint, so the proof is"
-    Write-Host "a real knowledge_base creation (embeds a live probe string) and a real ask (a live chat call)."
-
-    $tenantName = Ask "Test tenant name" "Test Tenant"
-    $tenantResult = Invoke-Api -Method Post -Uri "http://localhost:8080/api/v1/tenants" `
-        -Body (@{ name = $tenantName } | ConvertTo-Json)
-    if ($tenantResult.Status -ne 201) { Fail "Tenant creation failed (HTTP $($tenantResult.Status)): $($tenantResult.Body)" }
-    $tenantJson = $tenantResult.Body | ConvertFrom-Json
-    $script:TenantId = $tenantJson.tenantId
-    $tenantApiKey = $tenantJson.apiKey
-    Write-Success "Tenant created: $($script:TenantId)"
-
-    Write-Host ""
-    Write-Host "Chat provider options: openai, anthropic, ollama, google-genai"
-    $chatProvider = Ask "Chat provider" "openai"
-    $chatModel = Ask "Chat model name" "gpt-4o"
-    Write-Host "Embedding provider options: openai, ollama, google-genai (no anthropic - it has no embeddings API)"
-    $embeddingProvider = Ask "Embedding provider" "openai"
-    $embeddingModel = Ask "Embedding model name" "text-embedding-3-small"
-
-    $chatApiKey = ""
-    if ($chatProvider -ne "ollama") { $chatApiKey = Ask-Secret "Chat API key (required for $chatProvider)" }
-    $embeddingApiKey = ""
-    if ($embeddingProvider -ne "ollama") { $embeddingApiKey = Ask-Secret "Embedding API key (required for $embeddingProvider)" }
-
-    $authHeaders = @{ Authorization = "Bearer $tenantApiKey" }
-    $modelCfgBody = @{
-        chatProvider = $chatProvider; chatModel = $chatModel
-        embeddingProvider = $embeddingProvider; embeddingModel = $embeddingModel
-        chatApiKey = $chatApiKey; embeddingApiKey = $embeddingApiKey
-    } | ConvertTo-Json
-    $modelCfgResult = Invoke-Api -Method Put -Uri "http://localhost:8080/api/v1/tenants/$($script:TenantId)/model-config" -Headers $authHeaders -Body $modelCfgBody
-    if ($modelCfgResult.Status -ne 200) { Fail "Model configuration failed (HTTP $($modelCfgResult.Status)): $($modelCfgResult.Body)" }
-    Write-Success "Model configuration saved."
-
-    $kbName = Ask "Knowledge base name" "test-kb"
-    $kbResult = Invoke-Api -Method Post -Uri "http://localhost:8080/api/v1/knowledgebase" -Headers $authHeaders -Body (@{ name = $kbName } | ConvertTo-Json)
-    if ($kbResult.Status -ne 201) {
-        Fail "Knowledge base creation failed (HTTP $($kbResult.Status)): $($kbResult.Body) - this is the live embedding-model probe, so this most likely means the embedding provider/model/credentials aren't working."
-    }
-    $kbJson = $kbResult.Body | ConvertFrom-Json
-    $kbId = $kbJson.id
-    $kbDim = $kbJson.embeddingDim
-    Write-Success "Knowledge base created (id: $kbId, embedding_dim: $kbDim) - embedding model confirmed connected and functioning."
-
-    $testDocContent = Ask "Content for a small test document" "SynapseMCP is a multi-tenant retrieval-augmented generation platform."
-    $testDocFile = Join-Path $TmpDir "test-document.txt"
-    Set-Content -Path $testDocFile -Value $testDocContent
-
-    $uploadHeaders = @{ Authorization = "Bearer $tenantApiKey" }
-    $uploadResult = Invoke-Api -Method Post -Uri "http://localhost:8080/api/v1/knowledgebase/$kbId/documents" `
-        -Headers $uploadHeaders -Body @{ file = Get-Item $testDocFile } -ContentType "multipart/form-data"
-    if ($uploadResult.Status -notin 200, 202) { Fail "Test document upload failed (HTTP $($uploadResult.Status)): $($uploadResult.Body)" }
-    $jobId = ($uploadResult.Body | ConvertFrom-Json).jobId
-
-    Write-Info "Waiting for ingestion to complete (up to 60s - this re-exercises the embedding model)..."
-    $jobStatus = "PENDING"
-    for ($i = 0; $i -lt 60; $i++) {
-        $jobResp = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/jobs/$jobId" -Headers $uploadHeaders
-        $jobStatus = $jobResp.status
-        if ($jobStatus -in "READY", "FAILED") { break }
-        Start-Sleep -Seconds 1
-    }
-    if ($jobStatus -ne "READY") {
-        $errorDetail = (Invoke-RestMethod -Uri "http://localhost:8080/api/v1/jobs/$jobId" -Headers $uploadHeaders).errorDetail
-        Fail "Test document ingestion did not reach READY (status: $jobStatus, detail: $errorDetail)."
-    }
-    Write-Success "Test document ingested successfully - embedding model re-confirmed, and a real Lucene index now exists under $LuceneBaseDir\$kbId."
-
-    $testQuestion = Ask "A test question to ask against the document" "What is SynapseMCP?"
-    $askResult = Invoke-Api -Method Post -Uri "http://localhost:8080/api/v1/knowledgebase/$kbId/ask" -Headers $authHeaders -Body (@{ question = $testQuestion } | ConvertTo-Json)
-    if ($askResult.Status -ne 200) {
-        Fail "Test question failed (HTTP $($askResult.Status)): $($askResult.Body) - this is the live chat-model call, so this most likely means the chat provider/model/credentials aren't working."
-    }
-    $answer = ($askResult.Body | ConvertFrom-Json).answer
-    if ([string]::IsNullOrEmpty($answer)) { Fail "The chat model returned an empty answer." }
-    Write-Success "Chat model confirmed connected and functioning. Answer: `"$answer`""
-
-    # ── Step 6: Finalization ──────────────────────────────────────────────────
+    # ── Step 5: Finalization ──────────────────────────────────────────────────
     $script:StepName = "finalization"
-    Write-Step "Step 6/7: Finalization"
+    Write-Step "Step 5/6: Finalization"
     Stop-AppIfRunning
     Write-Success "Application stopped."
 
-    # ── Step 7 note: nothing to roll back on this path - we succeeded. ───────
-    Write-Step "Step 7/7: Done"
+    # ── Step 6 note: nothing to roll back on this path - we succeeded. ───────
+    Write-Step "Step 6/6: Done"
     Write-Host ""
     Write-Host "Initialization complete." -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Tenant id:        $($script:TenantId)"
-    Write-Host "Tenant API key:   $tenantApiKey   (shown once - save it now)" -ForegroundColor Yellow
-    Write-Host "Knowledge base:   $kbId  ($kbName, embedding_dim=$kbDim)"
     Write-Host ""
     Write-Host "You can now start the application yourself:"
     Write-Host ""
@@ -482,7 +377,8 @@ try {
     Write-Host "  `$env:REDIS_PORT = `"$RedisPort`""
     Write-Host "  cd `"$ProjectRoot`"; .\mvnw.cmd spring-boot:run -Dspring-boot.run.profiles=$AppProfile"
     Write-Host ""
-    Write-Host "The tenant, model configuration, and knowledge base created above are already there waiting for you."
+    Write-Host "Once it's running, create a tenant, configure a model, and create a knowledge base via"
+    Write-Host "the REST API or an MCP client - see scripts/instructions.md for a full walkthrough."
 }
 catch {
     Write-ErrorMsg "Initialization failed during: $($script:StepName)"
@@ -491,7 +387,4 @@ catch {
     Write-ErrorMsg "Rollback finished. Your environment has been restored as closely as possible to its"
     Write-ErrorMsg "prior state. Nothing from this failed run is left running or half-configured."
     exit 1
-}
-finally {
-    Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 }

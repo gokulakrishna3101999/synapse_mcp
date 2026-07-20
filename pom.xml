@@ -51,6 +51,17 @@
 			<artifactId>spring-boot-starter-actuator</artifactId>
 		</dependency>
 
+		<!-- mcp_plan.md Stage 1: HTTP Basic Auth for the MCP server's own mcp_users table, deliberately
+		     separate from REST's hand-rolled ApiKeyAuthenticationFilter (Grooming #11/#12) - this is
+		     the first Spring Security dependency in this project. Scoped via a dedicated
+		     SecurityFilterChain matched only to the MCP transport path, with a lower-priority
+		     catch-all chain permitting every other path through unchanged, so /api/v1/**/actuator/**
+		     stay governed entirely by the existing filters with zero behavior change. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
 		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
@@ -127,6 +138,19 @@
 			<groupId>com.google.genai</groupId>
 			<artifactId>google-genai</artifactId>
 			<version>${google-genai.version}</version>
+		</dependency>
+
+		<!-- mcp_plan.md Stage 1: the official MCP Java SDK's Spring WebMVC (servlet, non-reactive)
+		     server starter - deliberately the starter variant here (unlike the bare spring-ai-* model
+		     artifacts above), since auto-configuring the MCP transport/tool-registration machinery is
+		     exactly what's wanted, with no equivalent per-tenant-construction concern the way chat/
+		     embedding models have. Version managed by the spring-ai-bom import above, matching every
+		     other spring-ai-* dependency's convention. Built against Streamable HTTP
+		     (spring.ai.mcp.server.protocol: STREAMABLE), not SSE - see mcp_plan.md Grooming #17,
+		     superseding Grooming #1's original SSE choice: the current starter marks SSE deprecated. -->
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
 		</dependency>
 
 		<!-- @SuppressFBWarnings - compile-time only (provided scope keeps it out of the runtime
@@ -214,6 +238,22 @@
 			<groupId>org.apache.lucene</groupId>
 			<artifactId>lucene-queryparser</artifactId>
 			<version>10.5.0</version>
+		</dependency>
+
+		<!-- mcp_plan.md Stage 3, Grooming #3: per-tenant/per-provider rate limiting on paid
+		     chat/embedding provider calls, backed by Redis so REST and MCP traffic share the same
+		     token buckets (Grooming #5). bucket4j_jdk17-lettuce reuses this project's existing
+		     spring-boot-starter-data-redis (Lettuce) connection rather than needing a second Redis
+		     client. -->
+		<dependency>
+			<groupId>com.bucket4j</groupId>
+			<artifactId>bucket4j_jdk17-redis-common</artifactId>
+			<version>8.19.0</version>
+		</dependency>
+		<dependency>
+			<groupId>com.bucket4j</groupId>
+			<artifactId>bucket4j_jdk17-lettuce</artifactId>
+			<version>8.19.0</version>
 		</dependency>
 
 		<dependency>

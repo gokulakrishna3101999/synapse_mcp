@@ -52,6 +52,14 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * before the upload endpoint's own logic ever ran - this filter also fully buffers the body into
  * memory, which is the wrong approach for a 20MB binary file anyway (Spring's own multipart
  * handling streams to a configurable disk threshold instead).
+ *
+ * <p><b>MCP exemption (mcp_plan.md Stage 2, Grooming #19):</b> exempts {@code /mcp} for the exact
+ * same reason - the {@code ingest} tool's Base64-encoded {@code content_base64} shape has no
+ * multipart resolver to stream/cap it (there is no multipart request here at all), so this filter's
+ * 1MB default would silently cap it far below the REST upload's 20MB. {@code IngestMcpTool}
+ * enforces its own explicit size check against the same {@code
+ * spring.servlet.multipart.max-file-size} value instead. Every other (small) MCP tool call is
+ * unaffected by lifting this cap - none come close to 1MB.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 1)
@@ -59,6 +67,7 @@ public class RequestBodySizeLimitFilter extends OncePerRequestFilter {
 
     private static final AntPathMatcher PATH_MATCHER = new AntPathMatcher();
     private static final String DOCUMENT_UPLOAD_PATH_PATTERN = "/api/v1/knowledgebase/*/documents";
+    private static final String MCP_PATH_PATTERN = "/mcp";
 
     private final long maxBytes;
 
@@ -69,8 +78,10 @@ public class RequestBodySizeLimitFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return "POST".equalsIgnoreCase(request.getMethod())
-                && PATH_MATCHER.match(DOCUMENT_UPLOAD_PATH_PATTERN, request.getRequestURI());
+        String path = request.getRequestURI();
+        return ("POST".equalsIgnoreCase(request.getMethod())
+                        && PATH_MATCHER.match(DOCUMENT_UPLOAD_PATH_PATTERN, path))
+                || PATH_MATCHER.match(MCP_PATH_PATTERN, path);
     }
 
     @Override

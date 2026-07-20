@@ -8,6 +8,7 @@ import com.synapsemcp.ingestion.IngestionPipelineService;
 import com.synapsemcp.knowledgebase.KnowledgeBase;
 import com.synapsemcp.knowledgebase.KnowledgeBaseRepository;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.UUID;
 import org.apache.tika.Tika;
@@ -56,6 +57,8 @@ public class DocumentUploadService {
                     "text/markdown");
 
     private static final String DEFAULT_FILENAME = "unnamed";
+    private static final String DEFAULT_TEXT_FILENAME = "untitled.md";
+    private static final String TEXT_MARKDOWN_MIME_TYPE = "text/markdown";
 
     private final KnowledgeBaseRepository knowledgeBaseRepository;
     private final DocumentRepository documentRepository;
@@ -104,8 +107,61 @@ public class DocumentUploadService {
         }
 
         byte[] content = readBytes(file);
-        String filename = normalizeFilename(file.getOriginalFilename());
-        String mimeType = tika.detect(content, filename);
+        String filename = normalizeFilename(file.getOriginalFilename(), DEFAULT_FILENAME);
+        return upload(tenantId, knowledgeBaseId, content, filename, null);
+    }
+
+    /**
+     * mcp_plan.md Stage 2 {@code ingest} tool's file-bytes shape (the caller has already
+     * Base64-decoded {@code content_base64} itself - there is no multipart resolver on the MCP
+     * transport to do that, or to enforce a size cap, so the tool layer must do both explicitly).
+     * Runs the same Tika sniffing {@link #uploadDocument} does.
+     */
+    public UploadDocumentResponse uploadBytes(
+            UUID tenantId, UUID knowledgeBaseId, byte[] content, String filename) {
+        requireOwnedKnowledgeBase(tenantId, knowledgeBaseId);
+        return upload(
+                tenantId,
+                knowledgeBaseId,
+                content,
+                normalizeFilename(filename, DEFAULT_FILENAME),
+                null);
+    }
+
+    /**
+     * mcp_plan.md Stage 2 {@code ingest} tool's raw-{@code text} shape (rag_plan.md Grooming #28) -
+     * wrapped as a synthetic {@code .md} document with {@code mimeType} hard-set to {@code
+     * text/markdown}, skipping Tika sniffing entirely since the content's nature is already known.
+     */
+    public UploadDocumentResponse uploadRawText(
+            UUID tenantId, UUID knowledgeBaseId, String text, String filename) {
+        requireOwnedKnowledgeBase(tenantId, knowledgeBaseId);
+        byte[] content = text == null ? new byte[0] : text.getBytes(StandardCharsets.UTF_8);
+        return upload(
+                tenantId,
+                knowledgeBaseId,
+                content,
+                normalizeFilename(filename, DEFAULT_TEXT_FILENAME),
+                TEXT_MARKDOWN_MIME_TYPE);
+    }
+
+    /**
+     * Shared core once ownership has already been pre-checked by the caller: {@code
+     * mimeTypeOverride == null} runs Tika detection ({@link #uploadDocument}/{@link #uploadBytes});
+     * a non-null value (the raw-text shape) skips detection entirely.
+     */
+    private UploadDocumentResponse upload(
+            UUID tenantId,
+            UUID knowledgeBaseId,
+            byte[] content,
+            String filename,
+            String mimeTypeOverride) {
+        if (content.length == 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Bad Request", "content is empty");
+        }
+
+        String mimeType =
+                mimeTypeOverride != null ? mimeTypeOverride : tika.detect(content, filename);
         if (!SUPPORTED_MIME_TYPES.contains(mimeType)) {
             throw new ApiException(
                     HttpStatus.UNSUPPORTED_MEDIA_TYPE,
@@ -226,9 +282,9 @@ public class DocumentUploadService {
                                         "knowledge base not found"));
     }
 
-    private static String normalizeFilename(String originalFilename) {
+    private static String normalizeFilename(String originalFilename, String defaultFilename) {
         return originalFilename == null || originalFilename.isBlank()
-                ? DEFAULT_FILENAME
+                ? defaultFilename
                 : originalFilename;
     }
 

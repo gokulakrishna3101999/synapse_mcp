@@ -2,6 +2,8 @@ package com.synapsemcp.ingestion.extract;
 
 import com.synapsemcp.common.RedisKeyPrefix;
 import com.synapsemcp.document.ContentHasher;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,13 +29,19 @@ public class ExtractionCacheService {
 
     private static final Logger log = LoggerFactory.getLogger(ExtractionCacheService.class);
     private static final Duration CACHE_TTL = Duration.ofHours(24);
+    private static final String CACHE_METRIC = "synapsemcp.extraction.cache";
 
     private final StringRedisTemplate redisTemplate;
     private final RedisKeyPrefix redisKeyPrefix;
+    private final MeterRegistry meterRegistry;
 
-    ExtractionCacheService(StringRedisTemplate redisTemplate, RedisKeyPrefix redisKeyPrefix) {
+    ExtractionCacheService(
+            StringRedisTemplate redisTemplate,
+            RedisKeyPrefix redisKeyPrefix,
+            MeterRegistry meterRegistry) {
         this.redisTemplate = redisTemplate;
         this.redisKeyPrefix = redisKeyPrefix;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -41,12 +49,24 @@ public class ExtractionCacheService {
      *     same Redis database (e.g. {@code "pdf-extract"}, {@code "image-extract"}).
      */
     public String get(String cacheNamespace, byte[] content) {
+        String value;
         try {
-            return redisTemplate.opsForValue().get(key(cacheNamespace, content));
+            value = redisTemplate.opsForValue().get(key(cacheNamespace, content));
         } catch (Exception e) {
             log.warn("{} cache read failed - treating as a cache miss", cacheNamespace, e);
-            return null;
+            value = null;
         }
+        recordCacheResult(cacheNamespace, value != null ? "hit" : "miss");
+        return value;
+    }
+
+    private void recordCacheResult(String cacheNamespace, String result) {
+        Counter.builder(CACHE_METRIC)
+                .tag("cache", cacheNamespace)
+                .tag("result", result)
+                .description("OCR/vision extraction cache hit/miss count")
+                .register(meterRegistry)
+                .increment();
     }
 
     public void put(String cacheNamespace, byte[] content, String text) {

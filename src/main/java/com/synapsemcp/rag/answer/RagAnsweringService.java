@@ -3,6 +3,8 @@ package com.synapsemcp.rag.answer;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.synapsemcp.chat.ChatModelFactory;
+import com.synapsemcp.common.RateLimitKind;
+import com.synapsemcp.common.RateLimited;
 import com.synapsemcp.ingestion.chunk.TokenEstimator;
 import com.synapsemcp.knowledgebase.KnowledgeBaseModelConfig;
 import com.synapsemcp.knowledgebase.KnowledgeBaseModelConfigRepository;
@@ -78,6 +80,7 @@ public class RagAnsweringService {
         this.ragProperties = ragProperties;
     }
 
+    @RateLimited(RateLimitKind.CHAT)
     public AskResponse ask(UUID tenantId, UUID knowledgeBaseId, AskRequest request) {
         List<SearchResultChunk> retrieved = retrieve(tenantId, knowledgeBaseId, request);
         if (retrieved.isEmpty()) {
@@ -103,6 +106,7 @@ public class RagAnsweringService {
      * citations} event once the answer completes (rag_plan.md: "In streaming mode, citations are
      * sent as a final SSE event after the answer completes").
      */
+    @RateLimited(RateLimitKind.CHAT)
     public Flux<ServerSentEvent<String>> askStream(
             UUID tenantId, UUID knowledgeBaseId, AskRequest request) {
         List<SearchResultChunk> retrieved = retrieve(tenantId, knowledgeBaseId, request);

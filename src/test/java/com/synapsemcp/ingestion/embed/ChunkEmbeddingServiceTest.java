@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.synapsemcp.common.RedisKeyPrefix;
 import com.synapsemcp.embedding.EmbeddingModelFactory;
 import com.synapsemcp.knowledgebase.KnowledgeBaseModelConfig;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
@@ -33,6 +34,7 @@ class ChunkEmbeddingServiceTest {
 
     private final RedisKeyPrefix redisKeyPrefix = new RedisKeyPrefix("test");
     private final EmbeddingModel embeddingModel = mock(EmbeddingModel.class);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     private ChunkEmbeddingService service;
     private KnowledgeBaseModelConfig kbConfig;
@@ -42,7 +44,9 @@ class ChunkEmbeddingServiceTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(embeddingModelFactory.getEmbeddingModelForKnowledgeBase(any()))
                 .thenReturn(embeddingModel);
-        service = new ChunkEmbeddingService(embeddingModelFactory, redisTemplate, redisKeyPrefix);
+        service =
+                new ChunkEmbeddingService(
+                        embeddingModelFactory, redisTemplate, redisKeyPrefix, meterRegistry);
         kbConfig =
                 KnowledgeBaseModelConfig.create(
                         null, "openai", "gpt-4o", "openai", "text-embedding-3-small", "creds");
@@ -95,5 +99,19 @@ class ChunkEmbeddingServiceTest {
         assertThat(result.get(1)).containsExactly(5f, 6f);
         verify(embeddingModel).embed(List.of("miss text"));
         verify(valueOperations, times(1)).set(anyString(), anyString(), eq(Duration.ofDays(7)));
+    }
+
+    /** mcp_plan.md Stage 3: hit-rate metrics, following IngestionMetrics's Counter pattern. */
+    @Test
+    void recordsAHitAndAMissCounterPerText() {
+        when(valueOperations.multiGet(anyList())).thenReturn(Arrays.asList("9.0,9.0", null));
+        when(embeddingModel.embed(List.of("miss text"))).thenReturn(List.of(new float[] {5f, 6f}));
+
+        service.embed(kbConfig, List.of("hit text", "miss text"));
+
+        assertThat(meterRegistry.counter("synapsemcp.embedding.cache", "result", "hit").count())
+                .isEqualTo(1.0);
+        assertThat(meterRegistry.counter("synapsemcp.embedding.cache", "result", "miss").count())
+                .isEqualTo(1.0);
     }
 }

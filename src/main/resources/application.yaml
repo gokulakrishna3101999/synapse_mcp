@@ -3,6 +3,17 @@ spring:
     name: synapsemcp
   profiles:
     default: local
+  ai:
+    mcp:
+      server:
+        # mcp_plan.md Stage 1, Grooming #17: Streamable HTTP, not SSE (Grooming #1's original
+        # choice) - the current spring-ai-starter-mcp-server-webmvc:2.0.0 starter marks SSE
+        # deprecated, both remain HTTP-based so Grooming #1's actual rationale is unaffected.
+        # Endpoint defaults to POST/GET/DELETE /mcp (spring-ai-autoconfigure-mcp-server-common's own
+        # default, confirmed via javap, not overridden here).
+        name: synapsemcp
+        version: 0.0.1-SNAPSHOT
+        protocol: STREAMABLE
   servlet:
     multipart:
       # rag_plan.md Stage 4, Grooming #6a: 20MB single-file cap on document uploads. Verified via

@@ -168,6 +168,23 @@ public class ApiExceptionHandler {
     }
 
     /**
+     * mcp_plan.md Stage 3: a more specific handler than {@link #handleApiException} (which would
+     * otherwise also match, since this extends {@link ApiException}) - Spring resolves
+     * {@code @ExceptionHandler}s by nearest-matching type, so this one wins automatically. Same
+     * {@code Retry-After} shape as {@link #handleLockTimeout} above.
+     */
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ProblemDetail> handleRateLimitExceeded(RateLimitExceededException e) {
+        log.warn("Rate limit exceeded: {}", e.getMessage());
+        ProblemDetail problemDetail =
+                ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, e.getMessage());
+        problemDetail.setTitle(e.getTitle());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(e.getRetryAfterSeconds()))
+                .body(problemDetail);
+    }
+
+    /**
      * Fires when an entity fetched earlier in the same request (e.g. {@code
      * KnowledgeBaseService.requireOwnedKnowledgeBase}) is then updated or deleted by primary key
      * after a <i>different</i> concurrent request has already deleted the same row - Hibernate

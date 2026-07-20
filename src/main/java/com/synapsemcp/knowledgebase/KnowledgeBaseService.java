@@ -1,6 +1,10 @@
 package com.synapsemcp.knowledgebase;
 
 import com.synapsemcp.common.ApiException;
+import com.synapsemcp.common.RateLimitKind;
+import com.synapsemcp.common.RateLimited;
+import com.synapsemcp.document.DocumentRepository;
+import com.synapsemcp.document.DocumentStatusSummary;
 import com.synapsemcp.embedding.EmbeddingModelFactory;
 import com.synapsemcp.ingestion.index.LuceneIndexManager;
 import com.synapsemcp.tenant.ModelConfig;
@@ -8,7 +12,10 @@ import com.synapsemcp.tenant.ModelConfigRepository;
 import com.synapsemcp.tenant.Tenant;
 import com.synapsemcp.tenant.TenantRepository;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -33,6 +40,7 @@ public class KnowledgeBaseService {
     private final KnowledgeBaseModelConfigRepository knowledgeBaseModelConfigRepository;
     private final ModelConfigRepository modelConfigRepository;
     private final TenantRepository tenantRepository;
+    private final DocumentRepository documentRepository;
     private final EmbeddingModelFactory embeddingModelFactory;
     private final LuceneIndexManager luceneIndexManager;
     private final TransactionTemplate transactionTemplate;
@@ -42,6 +50,7 @@ public class KnowledgeBaseService {
             KnowledgeBaseModelConfigRepository knowledgeBaseModelConfigRepository,
             ModelConfigRepository modelConfigRepository,
             TenantRepository tenantRepository,
+            DocumentRepository documentRepository,
             EmbeddingModelFactory embeddingModelFactory,
             LuceneIndexManager luceneIndexManager,
             PlatformTransactionManager transactionManager) {
@@ -49,6 +58,7 @@ public class KnowledgeBaseService {
         this.knowledgeBaseModelConfigRepository = knowledgeBaseModelConfigRepository;
         this.modelConfigRepository = modelConfigRepository;
         this.tenantRepository = tenantRepository;
+        this.documentRepository = documentRepository;
         this.embeddingModelFactory = embeddingModelFactory;
         this.luceneIndexManager = luceneIndexManager;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -59,7 +69,14 @@ public class KnowledgeBaseService {
      * (Grooming #5b/#29) - deliberately run <b>outside</b> any transaction, before the short
      * pessimistic-lock section below, so a slow/hanging provider call never holds a pooled DB
      * connection or the per-tenant row lock idle (`plan.md` §9 2026-07-17).
+     *
+     * <p>{@link RateLimited} is placed here rather than on the private {@link
+     * #probeEmbeddingDimension} it calls (mcp_plan.md Stage 3) - that method is invoked via
+     * self-invocation from this one, which Spring AOP proxies never intercept regardless of
+     * visibility, so this public, externally-invoked entry point is the only place in this call
+     * path the aspect can actually apply.
      */
+    @RateLimited(RateLimitKind.EMBEDDING)
     public KnowledgeBaseResponse createKnowledgeBase(
             UUID tenantId, CreateKnowledgeBaseRequest request) {
         ModelConfig modelConfig =
@@ -133,13 +150,28 @@ public class KnowledgeBaseService {
                         modelConfig.getProviderCredentials());
         knowledgeBaseModelConfigRepository.save(snapshot);
 
-        return toResponse(knowledgeBase);
+        return toResponse(knowledgeBase, DocumentStatusSummary.EMPTY);
     }
 
     @Transactional(readOnly = true)
     public List<KnowledgeBaseResponse> listKnowledgeBases(UUID tenantId) {
-        return knowledgeBaseRepository.findAllByTenant_IdOrderByNameAsc(tenantId).stream()
-                .map(this::toResponse)
+        List<KnowledgeBase> knowledgeBases =
+                knowledgeBaseRepository.findAllByTenant_IdOrderByNameAsc(tenantId);
+        Map<UUID, List<DocumentRepository.StatusCount>> countsByKnowledgeBase = new HashMap<>();
+        for (DocumentRepository.KnowledgeBaseStatusCount count :
+                documentRepository.countByTenantIdGroupedByKnowledgeBaseAndStatus(tenantId)) {
+            countsByKnowledgeBase
+                    .computeIfAbsent(count.getKnowledgeBaseId(), id -> new ArrayList<>())
+                    .add(count);
+        }
+        return knowledgeBases.stream()
+                .map(
+                        kb ->
+                                toResponse(
+                                        kb,
+                                        DocumentStatusSummary.from(
+                                                countsByKnowledgeBase.getOrDefault(
+                                                        kb.getId(), List.of()))))
                 .toList();
     }
 
@@ -148,7 +180,10 @@ public class KnowledgeBaseService {
             UUID tenantId, UUID knowledgeBaseId, UpdateKnowledgeBaseRequest request) {
         KnowledgeBase knowledgeBase = requireOwnedKnowledgeBase(tenantId, knowledgeBaseId);
         knowledgeBase.setName(request.name().trim());
-        return toResponse(knowledgeBase);
+        DocumentStatusSummary summary =
+                DocumentStatusSummary.from(
+                        documentRepository.countByKnowledgeBaseIdGroupedByStatus(knowledgeBaseId));
+        return toResponse(knowledgeBase, summary);
     }
 
     @Transactional
@@ -192,8 +227,12 @@ public class KnowledgeBaseService {
                                         "knowledge base not found"));
     }
 
-    private KnowledgeBaseResponse toResponse(KnowledgeBase knowledgeBase) {
+    private KnowledgeBaseResponse toResponse(
+            KnowledgeBase knowledgeBase, DocumentStatusSummary documentStatusSummary) {
         return new KnowledgeBaseResponse(
-                knowledgeBase.getId(), knowledgeBase.getName(), knowledgeBase.getEmbeddingDim());
+                knowledgeBase.getId(),
+                knowledgeBase.getName(),
+                knowledgeBase.getEmbeddingDim(),
+                documentStatusSummary);
     }
 }

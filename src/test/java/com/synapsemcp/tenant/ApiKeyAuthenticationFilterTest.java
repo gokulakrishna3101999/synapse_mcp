@@ -116,4 +116,19 @@ class ApiKeyAuthenticationFilterTest {
                                 new MockHttpServletRequest("GET", "/api/v1/knowledgebase")))
                 .isFalse();
     }
+
+    @Test
+    void bypassesMcpUserRegistrationAndMcpTransportEndpoints() {
+        assertThat(
+                        filter.shouldNotFilter(
+                                new MockHttpServletRequest("POST", "/api/v1/mcp-users/register")))
+                .isTrue();
+        assertThat(
+                        filter.shouldNotFilter(
+                                new MockHttpServletRequest("GET", "/api/v1/mcp-users/register")))
+                .isFalse();
+        assertThat(filter.shouldNotFilter(new MockHttpServletRequest("POST", "/mcp"))).isTrue();
+        assertThat(filter.shouldNotFilter(new MockHttpServletRequest("GET", "/mcp"))).isTrue();
+        assertThat(filter.shouldNotFilter(new MockHttpServletRequest("DELETE", "/mcp"))).isTrue();
+    }
 }

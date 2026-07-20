@@ -8,8 +8,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.synapsemcp.common.ApiException;
+import com.synapsemcp.common.IngestionStatus;
 import com.synapsemcp.common.ProviderCredentials;
 import com.synapsemcp.common.ProviderCredentialsCodec;
+import com.synapsemcp.document.DocumentRepository;
+import com.synapsemcp.document.DocumentStatusSummary;
 import com.synapsemcp.embedding.EmbeddingModelFactory;
 import com.synapsemcp.ingestion.index.LuceneIndexManager;
 import com.synapsemcp.tenant.ModelConfig;
@@ -34,6 +37,7 @@ class KnowledgeBaseServiceTest {
             mock(KnowledgeBaseModelConfigRepository.class);
     private final ModelConfigRepository modelConfigRepository = mock(ModelConfigRepository.class);
     private final TenantRepository tenantRepository = mock(TenantRepository.class);
+    private final DocumentRepository documentRepository = mock(DocumentRepository.class);
     private final EmbeddingModelFactory embeddingModelFactory = mock(EmbeddingModelFactory.class);
     private final EmbeddingModel embeddingModel = mock(EmbeddingModel.class);
     private final LuceneIndexManager luceneIndexManager = mock(LuceneIndexManager.class);
@@ -54,6 +58,7 @@ class KnowledgeBaseServiceTest {
                         knowledgeBaseModelConfigRepository,
                         modelConfigRepository,
                         tenantRepository,
+                        documentRepository,
                         embeddingModelFactory,
                         luceneIndexManager,
                         transactionManager);
@@ -61,6 +66,10 @@ class KnowledgeBaseServiceTest {
         // TransactionTemplate.execute() needs a non-null TransactionStatus from getTransaction();
         // commit()/rollback() are Mockito void no-ops, matching a real commit with no side effects.
         when(transactionManager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
+
+        when(documentRepository.countByTenantIdGroupedByKnowledgeBaseAndStatus(any()))
+                .thenReturn(List.of());
+        when(documentRepository.countByKnowledgeBaseIdGroupedByStatus(any())).thenReturn(List.of());
 
         tenant = mock(Tenant.class);
         when(tenant.getId()).thenReturn(tenantId);
@@ -91,6 +100,7 @@ class KnowledgeBaseServiceTest {
 
         assertThat(response.name()).isEqualTo("kb-1");
         assertThat(response.embeddingDim()).isEqualTo(1536);
+        assertThat(response.documentStatusSummary()).isEqualTo(DocumentStatusSummary.EMPTY);
         verify(knowledgeBaseModelConfigRepository).save(any());
     }
 
@@ -213,18 +223,66 @@ class KnowledgeBaseServiceTest {
         assertThat(result.get(0).name()).isEqualTo("kb-1");
     }
 
+    /**
+     * mcp_plan.md Stage 2 (Grooming #19): the tenant-wide {@code GROUP BY} rollup is matched back
+     * to each knowledge_base by id and folded into its response - a knowledge_base with no matching
+     * rows in the rollup (not exercised in this test, but covered by the default empty-list stub in
+     * {@code setUp}) falls back to {@link DocumentStatusSummary#EMPTY}.
+     */
+    @Test
+    void listPopulatesEachKnowledgeBasesDocumentStatusSummaryFromTheBulkRollupQuery() {
+        KnowledgeBase kb = KnowledgeBase.create(tenant, "kb-1", 1536);
+        UUID kbId = kb.getId();
+        when(knowledgeBaseRepository.findAllByTenant_IdOrderByNameAsc(tenantId))
+                .thenReturn(List.of(kb));
+        when(documentRepository.countByTenantIdGroupedByKnowledgeBaseAndStatus(tenantId))
+                .thenReturn(
+                        List.of(
+                                statusCount(kbId, IngestionStatus.READY, 3),
+                                statusCount(kbId, IngestionStatus.FAILED, 1)));
+
+        List<KnowledgeBaseResponse> result = service.listKnowledgeBases(tenantId);
+
+        assertThat(result.get(0).documentStatusSummary())
+                .isEqualTo(new DocumentStatusSummary(0, 0, 3, 1));
+    }
+
+    private static DocumentRepository.KnowledgeBaseStatusCount statusCount(
+            UUID knowledgeBaseId, IngestionStatus status, long count) {
+        return new DocumentRepository.KnowledgeBaseStatusCount() {
+            @Override
+            public UUID getKnowledgeBaseId() {
+                return knowledgeBaseId;
+            }
+
+            @Override
+            public IngestionStatus getStatus() {
+                return status;
+            }
+
+            @Override
+            public long getCount() {
+                return count;
+            }
+        };
+    }
+
     @Test
     void updateRenamesAnOwnedKnowledgeBase() {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.create(tenant, "old-name", 1536);
         when(knowledgeBaseRepository.findByIdAndTenant_Id(kbId, tenantId))
                 .thenReturn(Optional.of(kb));
+        when(documentRepository.countByKnowledgeBaseIdGroupedByStatus(kbId))
+                .thenReturn(List.of(statusCount(kbId, IngestionStatus.READY, 2)));
 
         KnowledgeBaseResponse response =
                 service.updateKnowledgeBase(
                         tenantId, kbId, new UpdateKnowledgeBaseRequest("new-name"));
 
         assertThat(response.name()).isEqualTo("new-name");
+        assertThat(response.documentStatusSummary())
+                .isEqualTo(new DocumentStatusSummary(0, 0, 2, 0));
     }
 
     @Test

@@ -55,6 +55,20 @@ public class ModelConfigService {
 
     @Transactional
     public ModelConfigResponse configureModel(UUID tenantId, ConfigureModelRequest request) {
+        // rag_plan.md's ConfigureModelRequest carries @NotBlank on these four fields, but that
+        // constraint is only ever enforced by Spring MVC's own @Valid argument resolution - which
+        // only runs for the REST path (ModelConfigController's @Valid @RequestBody). The MCP path
+        // constructs this same record directly in Java code (ConfigureModelMcpTool), which never
+        // triggers Bean Validation at all - found live (session 2026-07-20) while adding MCP
+        // elicitation support: making the tool's own parameters optional (to let elicitation fill
+        // them in) let a blank chatModel sail all the way through to a raw, unhandled Postgres
+        // NOT-NULL constraint violation, leaking internal column names and the encoded-credentials
+        // blob straight back to the MCP client. Validating blankness here instead, transport-
+        // agnostic, closes the gap at its real source rather than papering over it in one tool.
+        requireNonBlank(request.chatProvider(), "chatProvider");
+        requireNonBlank(request.chatModel(), "chatModel");
+        requireNonBlank(request.embeddingProvider(), "embeddingProvider");
+        requireNonBlank(request.embeddingModel(), "embeddingModel");
         validateProvider(request.chatProvider(), CHAT_PROVIDERS, "chat provider");
         validateProvider(request.embeddingProvider(), EMBEDDING_PROVIDERS, "embedding provider");
         requireCredentialIfProviderNeedsOne(
@@ -156,6 +170,13 @@ public class ModelConfigService {
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "Unprocessable Entity",
                     fieldName + " is required for provider " + provider);
+        }
+    }
+
+    private void requireNonBlank(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST, "Bad Request", fieldName + " must not be blank");
         }
     }
 
