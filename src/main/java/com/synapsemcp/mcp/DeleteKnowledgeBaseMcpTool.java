@@ -15,9 +15,13 @@ import org.springframework.stereotype.Component;
 public class DeleteKnowledgeBaseMcpTool {
 
     private final KnowledgeBaseService knowledgeBaseService;
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver;
 
-    DeleteKnowledgeBaseMcpTool(KnowledgeBaseService knowledgeBaseService) {
+    DeleteKnowledgeBaseMcpTool(
+            KnowledgeBaseService knowledgeBaseService,
+            KnowledgeBaseNameResolver knowledgeBaseNameResolver) {
         this.knowledgeBaseService = knowledgeBaseService;
+        this.knowledgeBaseNameResolver = knowledgeBaseNameResolver;
     }
 
     @McpTool(
@@ -26,9 +30,14 @@ public class DeleteKnowledgeBaseMcpTool {
                     "Permanently deletes a knowledge base and all its associated documents and "
                             + "chunks. This cannot be undone.")
     public DeleteKnowledgeBaseResult deleteKnowledgeBase(
-            @McpToolParam(description = "Id of the knowledge base to delete")
-                    String knowledgeBaseId) {
-        UUID id = McpToolInputs.parseUuid(knowledgeBaseId, "knowledgeBaseId");
+            @McpToolParam(
+                            description =
+                                    "Name of the knowledge base to delete - if omitted, uses this"
+                                            + " account's active knowledge base (see"
+                                            + " switch_knowledge_base)",
+                            required = false)
+                    String knowledgeBaseName) {
+        UUID id = knowledgeBaseNameResolver.resolve(knowledgeBaseName);
         knowledgeBaseService.deleteKnowledgeBase(TenantContext.get(), id);
         return new DeleteKnowledgeBaseResult(id, true);
     }

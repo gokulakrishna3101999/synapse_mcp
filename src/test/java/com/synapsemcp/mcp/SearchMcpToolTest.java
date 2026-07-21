@@ -16,12 +16,16 @@ import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 
 class SearchMcpToolTest {
 
     private final HybridRetrievalService hybridRetrievalService =
             mock(HybridRetrievalService.class);
-    private final SearchMcpTool tool = new SearchMcpTool(hybridRetrievalService);
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver =
+            mock(KnowledgeBaseNameResolver.class);
+    private final SearchMcpTool tool =
+            new SearchMcpTool(hybridRetrievalService, knowledgeBaseNameResolver);
 
     @AfterEach
     void clearTenantContext() {
@@ -33,6 +37,7 @@ class SearchMcpToolTest {
         UUID tenantId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
         TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(kbId);
         List<SearchResultChunk> expected =
                 List.of(
                         new SearchResultChunk(
@@ -47,32 +52,31 @@ class SearchMcpToolTest {
         when(hybridRetrievalService.search(eq(tenantId), eq(kbId), eq(expectedRequest)))
                 .thenReturn(expected);
 
-        List<SearchResultChunk> response =
-                tool.search(kbId.toString(), "what is x?", 5, "vector", false);
+        List<SearchResultChunk> response = tool.search("my-kb", "what is x?", 5, "vector", false);
 
         assertThat(response).isEqualTo(expected);
     }
 
     @Test
     void throwsAClientSafeErrorForAnInvalidMode() {
-        TenantContext.set(UUID.randomUUID());
+        UUID tenantId = UUID.randomUUID();
+        TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(UUID.randomUUID());
 
-        assertThatThrownBy(
-                        () ->
-                                tool.search(
-                                        UUID.randomUUID().toString(),
-                                        "query",
-                                        null,
-                                        "not-a-mode",
-                                        null))
+        assertThatThrownBy(() -> tool.search("my-kb", "query", null, "not-a-mode", null))
                 .isInstanceOf(ApiException.class);
     }
 
     @Test
-    void throwsAClientSafeErrorForAMalformedKnowledgeBaseId() {
+    void propagatesTheResolversOwnErrorForAKnowledgeBaseNameThatDoesNotResolve() {
         TenantContext.set(UUID.randomUUID());
+        when(knowledgeBaseNameResolver.resolve("does-not-exist"))
+                .thenThrow(
+                        new ApiException(
+                                HttpStatus.NOT_FOUND, "Not Found", "knowledge base not found"));
 
-        assertThatThrownBy(() -> tool.search("not-a-uuid", "query", null, null, null))
-                .isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> tool.search("does-not-exist", "query", null, null, null))
+                .isInstanceOf(ApiException.class)
+                .hasMessage("knowledge base not found");
     }
 }

@@ -3,6 +3,7 @@ package com.synapsemcp.mcp;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -21,8 +22,11 @@ class McpTenantLinkingServiceTest {
     private final TenantService tenantService = mock(TenantService.class);
     private final TenantRepository tenantRepository = mock(TenantRepository.class);
     private final McpUserRepository mcpUserRepository = mock(McpUserRepository.class);
+    private final McpUserTenantLinkRepository linkRepository =
+            mock(McpUserTenantLinkRepository.class);
     private final McpTenantLinkingService linkingService =
-            new McpTenantLinkingService(tenantService, tenantRepository, mcpUserRepository);
+            new McpTenantLinkingService(
+                    tenantService, tenantRepository, mcpUserRepository, linkRepository);
 
     @Test
     void createsTheTenantAndLinksTheAccountWhenStillUnlinked() {
@@ -38,6 +42,12 @@ class McpTenantLinkingServiceTest {
         CreateTenantResponse result = linkingService.createAndLinkTenant(mcpUserId, "Acme Corp");
 
         assertThat(result).isEqualTo(response);
+        verify(linkRepository)
+                .save(
+                        argThat(
+                                link ->
+                                        link.getMcpUserId().equals(mcpUserId)
+                                                && link.getTenantId().equals(tenantId)));
     }
 
     /**
@@ -59,6 +69,7 @@ class McpTenantLinkingServiceTest {
         assertThatThrownBy(() -> linkingService.createAndLinkTenant(mcpUserId, "Acme Corp"))
                 .isInstanceOf(McpToolAccessDeniedException.class)
                 .hasMessage("This account is already linked to a tenant.");
+        verify(linkRepository, never()).save(any());
     }
 
     @Test

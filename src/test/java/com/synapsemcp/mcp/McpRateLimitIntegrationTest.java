@@ -116,9 +116,7 @@ class McpRateLimitIntegrationTest extends AbstractIntegrationTest {
                         "embeddingModel", "text-embedding-3-small",
                         "chatApiKey", "sk-fake-chat-key",
                         "embeddingApiKey", "sk-fake-embed-key"));
-        Map<String, Object> kb =
-                asMap(callTool("create_knowledge_base", Map.of("name", "ratelimit-kb")));
-        String kbId = (String) kb.get("id");
+        asMap(callTool("create_knowledge_base", Map.of("name", "ratelimit-kb")));
 
         boolean sawSuccess = false;
         boolean sawCleanDenial = false;
@@ -127,7 +125,11 @@ class McpRateLimitIntegrationTest extends AbstractIntegrationTest {
                     client.callTool(
                             new McpSchema.CallToolRequest(
                                     "ask",
-                                    Map.of("knowledgeBaseId", kbId, "question", "anything?")));
+                                    Map.of(
+                                            "knowledgeBaseName",
+                                            "ratelimit-kb",
+                                            "question",
+                                            "anything?")));
             String text = textOf(result);
             if (Boolean.TRUE.equals(result.isError())) {
                 assertThat(text).contains("Rate limit exceeded");

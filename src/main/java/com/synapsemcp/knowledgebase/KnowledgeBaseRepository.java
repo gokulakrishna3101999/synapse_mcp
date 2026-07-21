@@ -23,6 +23,15 @@ public interface KnowledgeBaseRepository extends JpaRepository<KnowledgeBase, UU
     Optional<KnowledgeBase> findByIdAndTenant_Id(UUID id, UUID tenantId);
 
     /**
+     * User-requested (2026-07-22): name-based lookup for the {@code switch_knowledge_base} MCP tool
+     * - case-insensitive to match {@code uq_knowledge_bases_tenant_name_ci}'s own per-tenant
+     * uniqueness guarantee (on {@code (tenant_id, lower(name))}), so exactly zero or one row can
+     * ever match. Same own-tenant-only shape as {@link #findByIdAndTenant_Id}: a name belonging to
+     * a different tenant's knowledge base is indistinguishable from a nonexistent one.
+     */
+    Optional<KnowledgeBase> findByNameIgnoreCaseAndTenant_Id(String name, UUID tenantId);
+
+    /**
      * Serializes concurrent document uploads to the same knowledge_base (Stage 4, `plan.md` §9
      * 2026-07-17) - same {@code SELECT ... FOR UPDATE} pattern {@code TenantRepository.lockById}
      * already uses for the 10-KB-per-tenant limit. Found live: without this, concurrent uploads of

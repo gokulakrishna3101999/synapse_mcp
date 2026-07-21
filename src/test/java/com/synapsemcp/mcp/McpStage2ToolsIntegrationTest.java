@@ -129,7 +129,11 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
                 asMap(
                         callTool(
                                 "update_knowledge_base",
-                                Map.of("knowledgeBaseId", kbId, "name", "stage2-kb-renamed")));
+                                Map.of(
+                                        "knowledgeBaseName",
+                                        "stage2-kb",
+                                        "newName",
+                                        "stage2-kb-renamed")));
         assertThat(renamedKb.get("name")).isEqualTo("stage2-kb-renamed");
 
         Map<String, Object> ingestResult =
@@ -137,8 +141,8 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
                         callTool(
                                 "ingest",
                                 Map.of(
-                                        "knowledgeBaseId",
-                                        kbId,
+                                        "knowledgeBaseName",
+                                        "stage2-kb-renamed",
                                         "text",
                                         "Synapse MCP is a retrieval-augmented generation platform"
                                                 + " used for testing knowledge bases.")));
@@ -157,7 +161,11 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
                 asList(
                         callTool(
                                 "search",
-                                Map.of("knowledgeBaseId", kbId, "query", "what is synapse mcp?")));
+                                Map.of(
+                                        "knowledgeBaseName",
+                                        "stage2-kb-renamed",
+                                        "query",
+                                        "what is synapse mcp?")));
         assertThat(searchResults).isNotEmpty();
         String chunkId = (String) searchResults.get(0).get("chunkId");
         assertThat(chunkId).isNotNull();
@@ -167,8 +175,8 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
                         callTool(
                                 "ask",
                                 Map.of(
-                                        "knowledgeBaseId",
-                                        kbId,
+                                        "knowledgeBaseName",
+                                        "stage2-kb-renamed",
                                         "question",
                                         "what is synapse mcp?")));
         assertThat(askResult.get("answer")).isEqualTo("Synapse MCP is a RAG platform [Source 1].");
@@ -178,8 +186,8 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
                         callTool(
                                 "evaluate",
                                 Map.of(
-                                        "knowledgeBaseId",
-                                        kbId,
+                                        "knowledgeBaseName",
+                                        "stage2-kb-renamed",
                                         "queries",
                                         List.of(
                                                 Map.of(
@@ -208,7 +216,10 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
         assertThat(((Number) tenantSummary.get("ready")).longValue()).isEqualTo(1L);
 
         Map<String, Object> deleteResult =
-                asMap(callTool("delete_knowledge_base", Map.of("knowledgeBaseId", kbId)));
+                asMap(
+                        callTool(
+                                "delete_knowledge_base",
+                                Map.of("knowledgeBaseName", "stage2-kb-renamed")));
         assertThat(deleteResult.get("deleted")).isEqualTo(Boolean.TRUE);
 
         List<Map<String, Object>> knowledgeBasesAfterDelete =
@@ -249,10 +260,62 @@ class McpStage2ToolsIntegrationTest extends AbstractIntegrationTest {
 
         String bigText = "word ".repeat(2 * 1024 * 1024 / 5);
         Map<String, Object> ingestResult =
-                asMap(callTool("ingest", Map.of("knowledgeBaseId", kbId, "text", bigText)));
+                asMap(
+                        callTool(
+                                "ingest",
+                                Map.of("knowledgeBaseName", "big-body-kb", "text", bigText)));
         String jobId = (String) ingestResult.get("jobId");
         assertThat(jobId).isNotNull();
         assertThat(awaitJobStatus(jobId)).isEqualTo("READY");
+    }
+
+    /**
+     * Regression protection for the 20MB cap on the MCP transport (mcp_plan.md Grooming #19(6),
+     * re-confirmed user-requested 2026-07-21 as "20MB despite the file format", Grooming #26):
+     * {@code IngestMcpTool}'s own explicit byte-length check on the <em>decoded</em> content (there
+     * is no multipart resolver on this transport to enforce it) must reject one byte over the cap
+     * with a clean tool-level error, before any format-specific code (Tika detection) ever runs -
+     * previously only ever verified live on disposable instances. The at-limit acceptance side
+     * stays live-verified only, for the same pipeline-cost reason as the REST twin ({@code
+     * DocumentControllerIntegrationTest#rejectsAFileOverTheTwentyMegabyteCapWith413BeforeAnyFormatDetection}).
+     */
+    @Test
+    void ingestRejectsDecodedContentOverTheTwentyMegabyteCapWithACleanError() {
+        String username = "mcp-stage2-overcap-user-" + UUID.randomUUID();
+        registerMcpUser(username, "correct-horse-battery-staple");
+        client = buildClient(username, "correct-horse-battery-staple");
+        client.initialize();
+
+        callTool("create_tenant", Map.of("name", "Stage 2 Over Cap Tenant"));
+        callTool(
+                "configure_model",
+                Map.of(
+                        "chatProvider", "openai",
+                        "chatModel", "gpt-4o",
+                        "embeddingProvider", "openai",
+                        "embeddingModel", "text-embedding-3-small",
+                        "chatApiKey", "sk-fake-chat-key",
+                        "embeddingApiKey", "sk-fake-embed-key"));
+        Map<String, Object> kb =
+                asMap(callTool("create_knowledge_base", Map.of("name", "over-cap-kb")));
+        String kbId = (String) kb.get("id");
+
+        byte[] oneByteOverTwentyMegabytes = new byte[20 * 1024 * 1024 + 1];
+        java.util.Arrays.fill(oneByteOverTwentyMegabytes, (byte) 'A');
+        String contentBase64 = Base64.getEncoder().encodeToString(oneByteOverTwentyMegabytes);
+
+        McpSchema.CallToolResult result =
+                client.callTool(
+                        new McpSchema.CallToolRequest(
+                                "ingest",
+                                Map.of(
+                                        "knowledgeBaseName", "over-cap-kb",
+                                        "filename", "huge.txt",
+                                        "contentBase64", contentBase64)));
+
+        assertThat(result.isError()).isEqualTo(Boolean.TRUE);
+        assertThat(((McpSchema.TextContent) result.content().get(0)).text())
+                .contains("exceeds maximum allowed size");
     }
 
     private String awaitJobStatus(String jobId) {

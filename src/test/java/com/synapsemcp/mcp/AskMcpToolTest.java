@@ -19,7 +19,9 @@ import org.junit.jupiter.api.Test;
 class AskMcpToolTest {
 
     private final RagAnsweringService ragAnsweringService = mock(RagAnsweringService.class);
-    private final AskMcpTool tool = new AskMcpTool(ragAnsweringService);
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver =
+            mock(KnowledgeBaseNameResolver.class);
+    private final AskMcpTool tool = new AskMcpTool(ragAnsweringService, knowledgeBaseNameResolver);
 
     @AfterEach
     void clearTenantContext() {
@@ -31,6 +33,7 @@ class AskMcpToolTest {
         UUID tenantId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
         TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(kbId);
         List<ConversationTurn> history = List.of(new ConversationTurn("user", "hi"));
         AskResponse expected = new AskResponse("the answer", List.of());
         AskRequest expectedRequest =
@@ -38,7 +41,7 @@ class AskMcpToolTest {
         when(ragAnsweringService.ask(eq(tenantId), eq(kbId), eq(expectedRequest)))
                 .thenReturn(expected);
 
-        AskResponse response = tool.ask(kbId.toString(), "what is x?", "en", history, null, true);
+        AskResponse response = tool.ask("my-kb", "what is x?", "en", history, null, true);
 
         assertThat(response).isEqualTo(expected);
     }
@@ -48,10 +51,11 @@ class AskMcpToolTest {
         UUID tenantId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
         TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(kbId);
         when(ragAnsweringService.ask(eq(tenantId), eq(kbId), org.mockito.ArgumentMatchers.any()))
                 .thenReturn(new AskResponse("answer", List.of()));
 
-        tool.ask(kbId.toString(), "question", null, null, null, null);
+        tool.ask("my-kb", "question", null, null, null, null);
 
         org.mockito.Mockito.verify(ragAnsweringService)
                 .ask(eq(tenantId), eq(kbId), org.mockito.ArgumentMatchers.any());

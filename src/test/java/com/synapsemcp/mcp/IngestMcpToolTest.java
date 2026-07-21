@@ -25,7 +25,10 @@ class IngestMcpToolTest {
     private static final long MAX_FILE_SIZE_BYTES = 20L * 1024 * 1024;
 
     private final DocumentUploadService documentUploadService = mock(DocumentUploadService.class);
-    private final IngestMcpTool tool = new IngestMcpTool(documentUploadService, "20MB");
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver =
+            mock(KnowledgeBaseNameResolver.class);
+    private final IngestMcpTool tool =
+            new IngestMcpTool(documentUploadService, knowledgeBaseNameResolver, "20MB");
 
     @AfterEach
     void clearTenantContext() {
@@ -37,6 +40,7 @@ class IngestMcpToolTest {
         UUID tenantId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
         TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(kbId);
         byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
         String base64 = Base64.getEncoder().encodeToString(content);
         UploadDocumentResponse expected =
@@ -46,7 +50,7 @@ class IngestMcpToolTest {
                         eq(tenantId), eq(kbId), eq(content), eq("notes.txt")))
                 .thenReturn(expected);
 
-        UploadDocumentResponse response = tool.ingest(kbId.toString(), "notes.txt", base64, null);
+        UploadDocumentResponse response = tool.ingest("my-kb", "notes.txt", base64, null);
 
         assertThat(response).isEqualTo(expected);
     }
@@ -56,6 +60,7 @@ class IngestMcpToolTest {
         UUID tenantId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
         TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(kbId);
         UploadDocumentResponse expected =
                 new UploadDocumentResponse(
                         UUID.randomUUID(), UUID.randomUUID(), IngestionStatus.PENDING, true);
@@ -63,7 +68,7 @@ class IngestMcpToolTest {
                         eq(tenantId), eq(kbId), eq("some raw text"), isNull()))
                 .thenReturn(expected);
 
-        UploadDocumentResponse response = tool.ingest(kbId.toString(), null, null, "some raw text");
+        UploadDocumentResponse response = tool.ingest("my-kb", null, null, "some raw text");
 
         assertThat(response).isEqualTo(expected);
     }
@@ -71,19 +76,21 @@ class IngestMcpToolTest {
     @Test
     void throwsAClientSafeErrorWhenNeitherContentBase64NorTextIsProvided() {
         TenantContext.set(UUID.randomUUID());
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(UUID.randomUUID());
 
-        assertThatThrownBy(() -> tool.ingest(UUID.randomUUID().toString(), "notes.txt", null, null))
+        assertThatThrownBy(() -> tool.ingest("my-kb", "notes.txt", null, null))
                 .isInstanceOf(ApiException.class);
     }
 
     @Test
     void throwsAClientSafeErrorWhenBothContentBase64AndTextAreProvided() {
         TenantContext.set(UUID.randomUUID());
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(UUID.randomUUID());
 
         assertThatThrownBy(
                         () ->
                                 tool.ingest(
-                                        UUID.randomUUID().toString(),
+                                        "my-kb",
                                         "notes.txt",
                                         Base64.getEncoder()
                                                 .encodeToString(
@@ -95,24 +102,20 @@ class IngestMcpToolTest {
     @Test
     void throwsAClientSafeErrorForInvalidBase64() {
         TenantContext.set(UUID.randomUUID());
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(UUID.randomUUID());
 
-        assertThatThrownBy(
-                        () ->
-                                tool.ingest(
-                                        UUID.randomUUID().toString(),
-                                        "notes.txt",
-                                        "not valid base64!!!",
-                                        null))
+        assertThatThrownBy(() -> tool.ingest("my-kb", "notes.txt", "not valid base64!!!", null))
                 .isInstanceOf(ApiException.class);
     }
 
     @Test
     void throwsAClientSafeErrorWhenDecodedContentExceedsTheConfiguredMaxFileSize() {
         TenantContext.set(UUID.randomUUID());
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(UUID.randomUUID());
         byte[] oversized = new byte[(int) MAX_FILE_SIZE_BYTES + 1];
         String base64 = Base64.getEncoder().encodeToString(oversized);
 
-        assertThatThrownBy(() -> tool.ingest(UUID.randomUUID().toString(), "big.bin", base64, null))
+        assertThatThrownBy(() -> tool.ingest("my-kb", "big.bin", base64, null))
                 .isInstanceOf(ApiException.class);
 
         verify(documentUploadService, org.mockito.Mockito.never())

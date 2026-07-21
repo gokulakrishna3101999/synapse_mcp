@@ -22,6 +22,7 @@ import com.synapsemcp.tenant.ConfigureModelRequest;
 import com.synapsemcp.tenant.CreateTenantRequest;
 import com.synapsemcp.tenant.CreateTenantResponse;
 import com.synapsemcp.tenant.ModelConfigResponse;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,6 +45,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 
@@ -248,6 +250,187 @@ class IngestionPipelineEdgeCaseIntegrationTest extends AbstractIntegrationTest {
         assertThat(documentRepository.findById(upload.documentId())).isEmpty();
         assertThat(ingestionJobRepository.findById(upload.jobId())).isEmpty();
         assertThat(chunkRepository.findByDocument_Id(upload.documentId())).isEmpty();
+    }
+
+    /**
+     * Architect-level validation round (rag_plan.md Grooming #87): the test above only covers a
+     * delete landing <em>before the pipeline's very first read</em> - it never proved anything
+     * about a delete landing <em>after chunks are already durably committed</em>, specifically the
+     * window between {@code ChunkPersistenceService.persist} committing and {@code
+     * LuceneIndexManager.indexChunks} (the very next line in {@code IngestionPipelineService.run}).
+     * Found live: a delete landing in exactly this window left a genuinely orphaned Lucene index
+     * directory - {@code IngestionPipelineService} now re-checks {@code
+     * knowledgeBaseRepository.existsById(...)} immediately before the Lucene write and skips it
+     * cleanly if the knowledge_base is already gone (verified at the unit level, with the real
+     * orchestration logic, in {@code IngestionPipelineServiceTest}).
+     *
+     * <p>This test instead characterizes the lower-level primitive the fix guards against - {@link
+     * LuceneIndexManager#indexChunks} itself has no existence check of its own and will happily
+     * write into a directory for a knowledge_base that no longer exists in Postgres at all, which
+     * is exactly why the check had to be added one level up, in the orchestrator, rather than
+     * relying on {@code indexChunks} to protect itself. (An earlier attempt reproduced this via a
+     * {@link MockitoSpyBean} intercepting {@code ChunkPersistenceService.persist} mid-flight, which
+     * turned out to be unreliable for this purpose - {@code Mockito.doAnswer(...).callRealMethod()}
+     * on a {@code @Transactional} method doesn't go through Spring's transactional AOP proxy, so
+     * the method's own commit never actually happened before the spy's answer continued, and a
+     * concurrent delete triggered from inside that answer genuinely deadlocked against the
+     * still-open transaction's own row lock - a real Postgres {@code lock_timeout} cancellation,
+     * SQLState {@code 55P03}. That failure mode was a test-technique artifact, not the race this
+     * test characterizes, so this version sidesteps Mockito entirely: the first upload reaches
+     * {@code READY} completely normally, its real committed chunks are read back, the
+     * knowledge_base is deleted for real, and {@code indexChunks} is invoked directly with that
+     * already-committed data.)
+     */
+    @Test
+    void aConcurrentDeleteBetweenPersistCommittingAndTheLuceneWriteDoesNotCorruptState()
+            throws IOException {
+        TenantFixture tenant = createConfiguredTenant("Delete during index tenant");
+        UUID kbId = createKnowledgeBase(tenant.apiKey(), "delete-during-index-kb");
+        UploadDocumentResponse upload =
+                uploadDocument(
+                                tenant.apiKey(),
+                                kbId,
+                                "notes.txt",
+                                "hello world".getBytes(StandardCharsets.UTF_8))
+                        .getBody();
+        awaitTerminalState(upload.jobId());
+
+        // Real, durably committed chunks - read back before the delete, exactly as
+        // IngestionPipelineService.run's own persistResult.chunks() would hold them in memory at
+        // the point it's about to call indexChunks.
+        List<Chunk> committedChunks = chunkRepository.findByDocument_KnowledgeBase_Id(kbId);
+        assertThat(committedChunks).isNotEmpty();
+
+        // Delete the knowledge_base for real - cascades document/job/chunks at the DB level.
+        ResponseEntity<Void> deleteResponse =
+                restTemplate.exchange(
+                        "/api/v1/knowledgebase/{id}",
+                        HttpMethod.DELETE,
+                        new HttpEntity<>(bearerHeaders(tenant.apiKey())),
+                        Void.class,
+                        kbId);
+        assertThat(deleteResponse.getStatusCode().is2xxSuccessful()).isTrue();
+        assertThat(knowledgeBaseRepository.findById(kbId)).isEmpty();
+        assertThat(documentRepository.findById(upload.documentId())).isEmpty();
+        assertThat(chunkRepository.findByDocument_Id(upload.documentId())).isEmpty();
+
+        // The write the pipeline was already committed to, happening anyway - exactly as it would
+        // if this delete had landed a moment after the real pipeline's own persist() call
+        // returned, before it reached its own indexChunks() call.
+        luceneIndexManager.indexChunks(kbId, committedChunks);
+
+        // indexChunks itself has no existence check of its own - this in-flight write completes
+        // successfully against the now-deleted knowledge_base's index directory, which is exactly
+        // why IngestionPipelineService.run() now re-checks existence one level up before ever
+        // reaching this call, rather than relying on indexChunks to protect itself.
+        Set<String> luceneChunkIdsAfterDelete = luceneIndexManager.listIndexedChunkIds(kbId);
+        assertThat(luceneChunkIdsAfterDelete)
+                .as(
+                        "indexChunks has no existence check of its own - a write reaching it after"
+                                + " a delete still leaves a genuinely orphaned Lucene index"
+                                + " directory for a knowledge_base that no longer exists in"
+                                + " Postgres at all")
+                .isNotEmpty();
+
+        // Clean up the directory this test itself proved gets orphaned, so it doesn't leak onto
+        // disk across suite runs.
+        luceneIndexManager.deleteIndex(kbId);
+    }
+
+    /**
+     * "Final" architect-level validation round (rag_plan.md Grooming #88): Grooming #87 explicitly
+     * guards the window between {@code persist} committing and the Lucene write, but {@code run()}
+     * checks knowledge_base existence exactly once more before that - right after {@code
+     * transitionToIndexing}, before {@code extract}/{@code chunk}/{@code embed} even run (line 131
+     * of {@code IngestionPipelineService}) - and never again until the Grooming #87 guard. {@code
+     * embed} is the one stage in that gap backed by a real network call to an external provider
+     * (mocked here, but genuinely slow in production) - the single most realistic point for a
+     * concurrent delete to land in practice, and never verified before this test.
+     *
+     * <p>Reproduced without touching {@code ChunkPersistenceService} or any {@code @Transactional}
+     * bean at all, avoiding Grooming #87's own Mockito dead end entirely: the already-mocked, plain
+     * (non-transactional) {@code EmbeddingModel} bean is re-stubbed for this test only to trigger
+     * the real delete from inside its own answer, before returning normal vectors - simulating the
+     * delete landing squarely inside the embed stage, well before {@code persist} ever runs.
+     *
+     * <p>Found live, not guessed: no data corruption results (see the finding recorded inline below
+     * on why), but the failure path itself has a real gap - {@code markFailed} throws trying to
+     * update a row that's already gone, uncaught, masked behind a generic Spring log line instead
+     * of this pipeline's own intentional failure message.
+     */
+    @Test
+    void aConcurrentDeleteDuringTheEmbedStageFailsTheJobCleanlyInsteadOfCorruptingState()
+            throws Exception {
+        TenantFixture tenant = createConfiguredTenant("Delete during embed tenant");
+        UUID kbId = createKnowledgeBase(tenant.apiKey(), "delete-during-embed-kb");
+
+        EmbeddingModel embeddingModel = mock(EmbeddingModel.class);
+        when(embeddingModel.dimensions()).thenReturn(1536);
+        when(embeddingModel.embed(anyList()))
+                .thenAnswer(
+                        invocation -> {
+                            ResponseEntity<Void> deleteResponse =
+                                    restTemplate.exchange(
+                                            "/api/v1/knowledgebase/{id}",
+                                            HttpMethod.DELETE,
+                                            new HttpEntity<>(bearerHeaders(tenant.apiKey())),
+                                            Void.class,
+                                            kbId);
+                            assertThat(deleteResponse.getStatusCode().is2xxSuccessful())
+                                    .as("the concurrent delete itself must succeed cleanly")
+                                    .isTrue();
+                            List<String> texts = invocation.getArgument(0);
+                            List<float[]> vectors = new ArrayList<>();
+                            for (int i = 0; i < texts.size(); i++) {
+                                vectors.add(new float[1536]);
+                            }
+                            return vectors;
+                        });
+        when(embeddingModelFactory.getEmbeddingModel(any())).thenReturn(embeddingModel);
+        when(embeddingModelFactory.getEmbeddingModelForKnowledgeBase(any()))
+                .thenReturn(embeddingModel);
+
+        UploadDocumentResponse upload =
+                uploadDocument(
+                                tenant.apiKey(),
+                                kbId,
+                                "notes.txt",
+                                "delete-during-embed unique marker content"
+                                        .getBytes(StandardCharsets.UTF_8))
+                        .getBody();
+
+        // The knowledge_base (and everything cascading from it) is gone by the time the delete
+        // triggered from inside the embed stub above completes - poll for that rather than
+        // asserting immediately, since run() is @Async.
+        long deadline = System.currentTimeMillis() + 15000;
+        while (System.currentTimeMillis() < deadline
+                && knowledgeBaseRepository.findById(kbId).isPresent()) {
+            Thread.sleep(25);
+        }
+        assertThat(knowledgeBaseRepository.findById(kbId)).isEmpty();
+        // A short settle window for whatever markStage/persist/markFailed run() attempts next,
+        // after the embed stage (and the delete inside it) returns control to it.
+        Thread.sleep(500);
+
+        // No data corruption results either way - confirmed below - but see Grooming #88 for a
+        // real, separate finding this test surfaced: the very next markStage() call (STAGE_PERSIST)
+        // throws ObjectOptimisticLockingFailureException on its own (Hibernate's own stale-row
+        // detection via merge() on a detached entity, even with no explicit @Version column - a
+        // genuine, previously-unverified safety net that covers every stage-transition write in
+        // the pipeline, not just the one persist-to-index window Grooming #87 explicitly guards).
+        // persist() itself is therefore never even reached in this scenario. markFailed then
+        // throws the identical exception trying to update the same already-gone row, which
+        // escapes this @Async method uncaught - masked behind Spring's generic
+        // SimpleAsyncUncaughtExceptionHandler log line instead of this pipeline's own intentional
+        // "ingestion job {} failed at stage {}" message, and ingestionMetrics.recordFailure(...)
+        // is never reached either. Not data corruption, but a real observability blind spot.
+        assertThat(documentRepository.findById(upload.documentId())).isEmpty();
+        assertThat(chunkRepository.findByDocument_Id(upload.documentId())).isEmpty();
+        assertThat(luceneIndexManager.listIndexedChunkIds(kbId))
+                .as(
+                        "a delete landing during the embed stage - before persist ever runs - must"
+                                + " not leave any Lucene data behind either")
+                .isEmpty();
     }
 
     // ---------------------------------------------------------------------

@@ -29,12 +29,15 @@ import org.springframework.util.unit.DataSize;
 public class IngestMcpTool {
 
     private final DocumentUploadService documentUploadService;
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver;
     private final long maxContentBytes;
 
     public IngestMcpTool(
             DocumentUploadService documentUploadService,
+            KnowledgeBaseNameResolver knowledgeBaseNameResolver,
             @Value("${spring.servlet.multipart.max-file-size}") String maxFileSize) {
         this.documentUploadService = documentUploadService;
+        this.knowledgeBaseNameResolver = knowledgeBaseNameResolver;
         this.maxContentBytes = DataSize.parse(maxFileSize).toBytes();
     }
 
@@ -47,8 +50,13 @@ public class IngestMcpTool {
                             + "returns immediately with a Job ID. You MUST use the job_status "
                             + "tool every 5 seconds until the job completes.")
     public UploadDocumentResponse ingest(
-            @McpToolParam(description = "Id of the knowledge base to ingest into")
-                    String knowledgeBaseId,
+            @McpToolParam(
+                            description =
+                                    "Name of the knowledge base to ingest into - if omitted, uses"
+                                            + " this account's active knowledge base (see"
+                                            + " switch_knowledge_base)",
+                            required = false)
+                    String knowledgeBaseName,
             @McpToolParam(
                             description = "Filename (used with contentBase64; ignored for text)",
                             required = false)
@@ -63,7 +71,7 @@ public class IngestMcpTool {
                                     "Raw text content - provide this or contentBase64, not both",
                             required = false)
                     String text) {
-        UUID id = McpToolInputs.parseUuid(knowledgeBaseId, "knowledgeBaseId");
+        UUID id = knowledgeBaseNameResolver.resolve(knowledgeBaseName);
         boolean hasBytes = contentBase64 != null && !contentBase64.isBlank();
         boolean hasText = text != null && !text.isBlank();
         if (hasBytes == hasText) {

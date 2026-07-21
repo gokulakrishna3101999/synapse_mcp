@@ -20,17 +20,26 @@ import org.springframework.stereotype.Component;
 public class SearchMcpTool {
 
     private final HybridRetrievalService hybridRetrievalService;
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver;
 
-    public SearchMcpTool(HybridRetrievalService hybridRetrievalService) {
+    public SearchMcpTool(
+            HybridRetrievalService hybridRetrievalService,
+            KnowledgeBaseNameResolver knowledgeBaseNameResolver) {
         this.hybridRetrievalService = hybridRetrievalService;
+        this.knowledgeBaseNameResolver = knowledgeBaseNameResolver;
     }
 
     @McpTool(
             name = "search",
             description = "Hybrid retrieval over a knowledge base's indexed document chunks.")
     public List<SearchResultChunk> search(
-            @McpToolParam(description = "Id of the knowledge base to search")
-                    String knowledgeBaseId,
+            @McpToolParam(
+                            description =
+                                    "Name of the knowledge base to search - if omitted, uses this"
+                                            + " account's active knowledge base (see"
+                                            + " switch_knowledge_base)",
+                            required = false)
+                    String knowledgeBaseName,
             @McpToolParam(description = "Search query text") String query,
             @McpToolParam(
                             description = "Maximum number of results to return (default 10)",
@@ -45,7 +54,7 @@ public class SearchMcpTool {
                             description = "Whether to rerank results with an LLM (default true)",
                             required = false)
                     Boolean rerank) {
-        UUID id = McpToolInputs.parseUuid(knowledgeBaseId, "knowledgeBaseId");
+        UUID id = knowledgeBaseNameResolver.resolve(knowledgeBaseName);
         SearchMode searchMode = McpToolInputs.parseSearchMode(mode);
         SearchRequest request = new SearchRequest(query, topK, null, searchMode, rerank);
         return hybridRetrievalService.search(TenantContext.get(), id, request);

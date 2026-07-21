@@ -446,6 +446,46 @@ class KnowledgeBaseIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
+    /**
+     * User-requested (2026-07-22): duplicate-name rejection must be concurrency-proof, not just
+     * checked-then-raced. Fires many concurrent creates for the same tenant with the identical name
+     * - exactly one must win with {@code 201}, every other must get a clean {@code 409}, never a
+     * raw database error, and only one row for that name may ever exist afterward.
+     */
+    @Test
+    void concurrentKnowledgeBaseCreationWithTheSameNameOnlyOneSucceeds() throws Exception {
+        TenantFixture tenant = createConfiguredTenant("Concurrent duplicate name tenant");
+        int concurrency = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(concurrency);
+        try {
+            List<Future<ResponseEntity<String>>> futures = new ArrayList<>();
+            for (int i = 0; i < concurrency; i++) {
+                futures.add(executor.submit(() -> createRaw(tenant.apiKey(), "same-name-race")));
+            }
+            long successCount = 0;
+            for (Future<ResponseEntity<String>> future : futures) {
+                int status = future.get().getStatusCode().value();
+                assertThat(status).isIn(201, 409);
+                if (status == 201) {
+                    successCount++;
+                }
+            }
+            assertThat(successCount).isEqualTo(1);
+        } finally {
+            executor.shutdown();
+        }
+
+        ResponseEntity<KnowledgeBaseResponse[]> listResponse =
+                restTemplate.exchange(
+                        "/api/v1/knowledgebase",
+                        HttpMethod.GET,
+                        new HttpEntity<>(bearerHeaders(tenant.apiKey())),
+                        KnowledgeBaseResponse[].class);
+        assertThat(List.of(listResponse.getBody()))
+                .filteredOn(kb -> kb.name().equalsIgnoreCase("same-name-race"))
+                .hasSize(1);
+    }
+
     private record CascadeFixtureIds(UUID documentId, UUID chunkId, UUID ingestionJobId) {}
 
     /**

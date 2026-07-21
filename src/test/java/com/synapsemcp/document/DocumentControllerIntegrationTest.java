@@ -18,7 +18,12 @@ import com.synapsemcp.tenant.ConfigureModelRequest;
 import com.synapsemcp.tenant.CreateTenantRequest;
 import com.synapsemcp.tenant.CreateTenantResponse;
 import com.synapsemcp.tenant.ModelConfigResponse;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -32,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.resttestclient.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpEntity;
@@ -61,6 +67,8 @@ class DocumentControllerIntegrationTest extends AbstractIntegrationTest {
     @Autowired private KnowledgeBaseRepository knowledgeBaseRepository;
     @Autowired private DocumentRepository documentRepository;
     @Autowired private IngestionJobRepository ingestionJobRepository;
+
+    @LocalServerPort private int port;
 
     @MockitoBean private EmbeddingModelFactory embeddingModelFactory;
 
@@ -216,6 +224,77 @@ class DocumentControllerIntegrationTest extends AbstractIntegrationTest {
         assertThat(response.getBody().dispatched()).isTrue();
 
         assertThat(awaitTerminalState(response.getBody().jobId())).isEqualTo(IngestionStatus.READY);
+    }
+
+    /**
+     * Regression protection for the 20MB upload cap (rag_plan.md Grooming #6a, re-confirmed
+     * user-requested 2026-07-21 as "20MB despite the file format", mcp_plan.md Grooming #26): a
+     * file one byte over the cap must get the clean 413 contract ({@code
+     * MaxUploadSizeExceededException} → {@code ApiExceptionHandler}), enforced by Spring's
+     * multipart resolver <em>before</em> any format-specific code (Tika detection) ever runs -
+     * previously only ever verified live on disposable instances, never regression-protected. The
+     * at-limit acceptance side (exactly 20MB is accepted) stays live-verified only: it would push a
+     * 20MB document through the real chunking pipeline on every suite run for no additional
+     * boundary information.
+     *
+     * <p>Deliberately uses a raw {@link HttpClient}, not {@code TestRestTemplate} - found live
+     * during this test's own first run (not guessed): {@code TestRestTemplate}'s underlying Apache
+     * HttpClient5 classic transport writes multipart bodies via a blocking {@code
+     * ChunkedOutputStream} with no {@code Content-Length} and no working {@code Expect:
+     * 100-continue} negotiation for this call shape, so when the server sends its 413 response
+     * before the ~21MB body finishes writing, the blocking socket write fails with a raw {@code
+     * SocketException: Broken pipe} instead of surfacing the response - confirmed as a test-client
+     * artifact, not a server defect, by reproducing the identical upload successfully (clean 413,
+     * no exception) via both plain {@code curl} and this same JDK {@link HttpClient} with {@code
+     * expectContinue(true)} enabled, which properly waits for the server's response before
+     * committing to writing the body.
+     */
+    @Test
+    void rejectsAFileOverTheTwentyMegabyteCapWith413BeforeAnyFormatDetection() throws Exception {
+        TenantFixture tenant = createConfiguredTenant("Oversized upload tenant");
+        UUID kbId = createKnowledgeBase(tenant.apiKey(), "upload-kb");
+
+        byte[] oneByteOverTwentyMegabytes = new byte[20 * 1024 * 1024 + 1];
+        java.util.Arrays.fill(oneByteOverTwentyMegabytes, (byte) 'A');
+
+        String boundary = "----synapsemcp-test-boundary";
+        String partHeader =
+                "--"
+                        + boundary
+                        + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"huge.txt\""
+                        + "\r\nContent-Type: text/plain\r\n\r\n";
+        String partFooter = "\r\n--" + boundary + "--\r\n";
+        HttpRequest.BodyPublisher body =
+                HttpRequest.BodyPublishers.concat(
+                        HttpRequest.BodyPublishers.ofString(partHeader),
+                        HttpRequest.BodyPublishers.ofByteArray(oneByteOverTwentyMegabytes),
+                        HttpRequest.BodyPublishers.ofString(partFooter));
+
+        HttpClient httpClient =
+                HttpClient.newBuilder()
+                        .version(HttpClient.Version.HTTP_1_1)
+                        .connectTimeout(Duration.ofSeconds(5))
+                        .build();
+        HttpRequest request =
+                HttpRequest.newBuilder()
+                        .uri(
+                                URI.create(
+                                        "http://localhost:"
+                                                + port
+                                                + "/api/v1/knowledgebase/"
+                                                + kbId
+                                                + "/documents"))
+                        .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                        .header("Authorization", "Bearer " + tenant.apiKey())
+                        .expectContinue(true)
+                        .POST(body)
+                        .build();
+
+        HttpResponse<String> response =
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE.value());
+        assertThat(response.body()).contains("Payload Too Large");
     }
 
     @Test

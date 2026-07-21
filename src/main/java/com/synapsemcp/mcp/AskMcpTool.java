@@ -24,9 +24,13 @@ import org.springframework.stereotype.Component;
 public class AskMcpTool {
 
     private final RagAnsweringService ragAnsweringService;
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver;
 
-    public AskMcpTool(RagAnsweringService ragAnsweringService) {
+    public AskMcpTool(
+            RagAnsweringService ragAnsweringService,
+            KnowledgeBaseNameResolver knowledgeBaseNameResolver) {
         this.ragAnsweringService = ragAnsweringService;
+        this.knowledgeBaseNameResolver = knowledgeBaseNameResolver;
     }
 
     @McpTool(
@@ -36,8 +40,13 @@ public class AskMcpTool {
                             + "base's documents, returning the complete answer with citations in "
                             + "a single result.")
     public AskResponse ask(
-            @McpToolParam(description = "Id of the knowledge base to answer from")
-                    String knowledgeBaseId,
+            @McpToolParam(
+                            description =
+                                    "Name of the knowledge base to answer from - if omitted, uses"
+                                            + " this account's active knowledge base (see"
+                                            + " switch_knowledge_base)",
+                            required = false)
+                    String knowledgeBaseName,
             @McpToolParam(description = "The question to answer") String question,
             @McpToolParam(
                             description = "Language to respond in (default: same as the question)",
@@ -58,7 +67,7 @@ public class AskMcpTool {
                                     "Whether to rerank retrieved chunks with an LLM (default true)",
                             required = false)
                     Boolean rerank) {
-        UUID id = McpToolInputs.parseUuid(knowledgeBaseId, "knowledgeBaseId");
+        UUID id = knowledgeBaseNameResolver.resolve(knowledgeBaseName);
         SearchMode searchMode = McpToolInputs.parseSearchMode(mode);
         AskRequest request = new AskRequest(question, language, history, searchMode, rerank);
         return ragAnsweringService.ask(TenantContext.get(), id, request);

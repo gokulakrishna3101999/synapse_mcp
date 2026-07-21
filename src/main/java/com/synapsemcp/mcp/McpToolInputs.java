@@ -11,6 +11,11 @@ import org.springframework.http.HttpStatus;
  * IllegalArgumentException} with a Java-internal message on bad input - this rethrows as {@link
  * ApiException} instead, matching every domain service's own convention, so the message the MCP
  * client sees is clean either way (Grooming #19).
+ *
+ * <p>Every knowledge-base-scoped tool's own {@code knowledgeBaseId} parameter was replaced entirely
+ * by {@code knowledgeBaseName} (user-requested, 2026-07-22, a deliberate breaking change - see
+ * {@link KnowledgeBaseNameResolver}), so the id-resolution helper that used to live here was
+ * removed rather than left unused.
  */
 final class McpToolInputs {
 

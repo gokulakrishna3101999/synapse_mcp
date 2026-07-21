@@ -162,8 +162,8 @@ class CombinedRestAndMcpIntegrationTest extends AbstractIntegrationTest {
                 callTool(
                         "ingest",
                         Map.of(
-                                "knowledgeBaseId",
-                                kb1Id,
+                                "knowledgeBaseName",
+                                "mcp-origin-kb",
                                 "text",
                                 "The MCP-ORIGIN-MARKER document was created entirely through the"
                                         + " MCP transport, never touching the REST API."));
@@ -240,8 +240,8 @@ class CombinedRestAndMcpIntegrationTest extends AbstractIntegrationTest {
                                 callToolList(
                                         "search",
                                         Map.of(
-                                                "knowledgeBaseId",
-                                                kb2Id.toString(),
+                                                "knowledgeBaseName",
+                                                "rest-origin-kb",
                                                 "query",
                                                 "REST-ORIGIN-MARKER"));
         assertThat(mcpSearchOfRestData)
@@ -277,7 +277,7 @@ class CombinedRestAndMcpIntegrationTest extends AbstractIntegrationTest {
                 .isEqualTo(2L);
 
         // --- 8. Deleting one KB via MCP is immediately reflected in REST's own view ---------
-        callTool("delete_knowledge_base", Map.of("knowledgeBaseId", kb1Id));
+        callTool("delete_knowledge_base", Map.of("knowledgeBaseName", "mcp-origin-kb"));
 
         ResponseEntity<KnowledgeBaseResponse[]> restKbListAfterMcpDelete =
                 restTemplate.exchange(

@@ -21,7 +21,10 @@ import org.junit.jupiter.api.Test;
 class EvaluateMcpToolTest {
 
     private final EvaluationService evaluationService = mock(EvaluationService.class);
-    private final EvaluateMcpTool tool = new EvaluateMcpTool(evaluationService);
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver =
+            mock(KnowledgeBaseNameResolver.class);
+    private final EvaluateMcpTool tool =
+            new EvaluateMcpTool(evaluationService, knowledgeBaseNameResolver);
 
     @AfterEach
     void clearTenantContext() {
@@ -33,6 +36,7 @@ class EvaluateMcpToolTest {
         UUID tenantId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
         TenantContext.set(tenantId);
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(kbId);
         List<EvaluateQuery> queries =
                 List.of(new EvaluateQuery("what is x?", List.of(UUID.randomUUID())));
         EvaluateResponse expected = new EvaluateResponse(List.of(), 1.0, 1.0, 1.0);
@@ -41,7 +45,7 @@ class EvaluateMcpToolTest {
         when(evaluationService.evaluate(eq(tenantId), eq(kbId), eq(expectedRequest)))
                 .thenReturn(expected);
 
-        EvaluateResponse response = tool.evaluate(kbId.toString(), queries, 5, "keyword", false);
+        EvaluateResponse response = tool.evaluate("my-kb", queries, 5, "keyword", false);
 
         assertThat(response).isEqualTo(expected);
     }
@@ -49,16 +53,10 @@ class EvaluateMcpToolTest {
     @Test
     void throwsAClientSafeErrorForAnInvalidMode() {
         TenantContext.set(UUID.randomUUID());
+        when(knowledgeBaseNameResolver.resolve("my-kb")).thenReturn(UUID.randomUUID());
         List<EvaluateQuery> queries = List.of(new EvaluateQuery("q", List.of()));
 
-        assertThatThrownBy(
-                        () ->
-                                tool.evaluate(
-                                        UUID.randomUUID().toString(),
-                                        queries,
-                                        null,
-                                        "not-a-mode",
-                                        null))
+        assertThatThrownBy(() -> tool.evaluate("my-kb", queries, null, "not-a-mode", null))
                 .isInstanceOf(ApiException.class);
     }
 }

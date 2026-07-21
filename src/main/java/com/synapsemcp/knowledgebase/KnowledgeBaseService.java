@@ -16,11 +16,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -137,9 +139,16 @@ public class KnowledgeBaseService {
                     "Unprocessable Entity",
                     "maximum of " + MAX_KNOWLEDGE_BASES_PER_TENANT + " knowledge bases per tenant");
         }
+        requireNameNotTaken(tenantId, name, null);
 
-        KnowledgeBase knowledgeBase =
-                knowledgeBaseRepository.save(KnowledgeBase.create(tenant, name, embeddingDim));
+        KnowledgeBase knowledgeBase;
+        try {
+            knowledgeBase =
+                    knowledgeBaseRepository.saveAndFlush(
+                            KnowledgeBase.create(tenant, name, embeddingDim));
+        } catch (DataIntegrityViolationException e) {
+            throw duplicateNameConflict(name);
+        }
         KnowledgeBaseModelConfig snapshot =
                 KnowledgeBaseModelConfig.create(
                         knowledgeBase,
@@ -179,7 +188,14 @@ public class KnowledgeBaseService {
     public KnowledgeBaseResponse updateKnowledgeBase(
             UUID tenantId, UUID knowledgeBaseId, UpdateKnowledgeBaseRequest request) {
         KnowledgeBase knowledgeBase = requireOwnedKnowledgeBase(tenantId, knowledgeBaseId);
-        knowledgeBase.setName(request.name().trim());
+        String newName = request.name().trim();
+        requireNameNotTaken(tenantId, newName, knowledgeBaseId);
+        knowledgeBase.setName(newName);
+        try {
+            knowledgeBaseRepository.saveAndFlush(knowledgeBase);
+        } catch (DataIntegrityViolationException e) {
+            throw duplicateNameConflict(newName);
+        }
         DocumentStatusSummary summary =
                 DocumentStatusSummary.from(
                         documentRepository.countByKnowledgeBaseIdGroupedByStatus(knowledgeBaseId));
@@ -225,6 +241,41 @@ public class KnowledgeBaseService {
                                         HttpStatus.NOT_FOUND,
                                         "Not Found",
                                         "knowledge base not found"));
+    }
+
+    /**
+     * User-requested (2026-07-22): a code-level pre-check for {@code create}/{@code rename}, ahead
+     * of the database's own {@code uq_knowledge_bases_tenant_name_ci} constraint - gives a clean,
+     * name-specific error on the common path instead of relying solely on a constraint-violation
+     * catch. {@code excludingKnowledgeBaseId} lets a rename pass when the only "conflicting" row is
+     * the knowledge base being renamed itself (e.g. a case-only change, or no change at all);
+     * {@code create} passes {@code null}, which can never equal a real id, so every existing row
+     * counts as a conflict.
+     *
+     * <p>This check alone is not concurrency-proof on its own - two concurrent calls could both
+     * pass it before either commits (the same TOCTOU shape as Grooming #29's {@code
+     * switch_knowledge_base} finding). {@code createWithinLock} closes that window for
+     * create-vs-create by running under the same per-tenant {@code tenantRepository.lockById} lock
+     * already used for the knowledge-base-count check; {@code updateKnowledgeBase} has no such lock
+     * (a rename can race a concurrent create, or another concurrent rename), so both call sites
+     * also catch the constraint violation itself via {@code saveAndFlush} as the ultimate backstop
+     * - the database's own unique index is the only thing that can never be raced past.
+     */
+    private void requireNameNotTaken(UUID tenantId, String name, UUID excludingKnowledgeBaseId) {
+        knowledgeBaseRepository
+                .findByNameIgnoreCaseAndTenant_Id(name, tenantId)
+                .filter(existing -> !Objects.equals(existing.getId(), excludingKnowledgeBaseId))
+                .ifPresent(
+                        existing -> {
+                            throw duplicateNameConflict(name);
+                        });
+    }
+
+    private ApiException duplicateNameConflict(String name) {
+        return new ApiException(
+                HttpStatus.CONFLICT,
+                "Conflict",
+                "a knowledge base named '" + name + "' already exists");
     }
 
     private KnowledgeBaseResponse toResponse(

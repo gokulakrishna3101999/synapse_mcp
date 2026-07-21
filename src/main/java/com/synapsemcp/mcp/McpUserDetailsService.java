@@ -11,7 +11,7 @@ public class McpUserDetailsService implements UserDetailsService {
 
     private final McpUserRepository mcpUserRepository;
 
-    public McpUserDetailsService(McpUserRepository mcpUserRepository) {
+    McpUserDetailsService(McpUserRepository mcpUserRepository) {
         this.mcpUserRepository = mcpUserRepository;
     }
 
@@ -25,6 +25,10 @@ public class McpUserDetailsService implements UserDetailsService {
                                         new UsernameNotFoundException(
                                                 "no mcp_users account for username " + username));
         return new McpUserPrincipal(
-                user.getId(), user.getUsername(), user.getPasswordHash(), user.getTenantId());
+                user.getId(),
+                user.getUsername(),
+                user.getPasswordHash(),
+                user.getTenantId(),
+                user.getActiveKnowledgeBaseId());
     }
 }

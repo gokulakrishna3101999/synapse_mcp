@@ -28,6 +28,9 @@ class McpToolAccessAspectTest {
     @McpTool(name = "create_tenant", description = "test")
     void createTenantStub() {}
 
+    @McpTool(name = "switch_tenant", description = "test")
+    void switchTenantStub() {}
+
     @McpTool(name = "search", description = "test")
     void otherToolStub() {}
 
@@ -45,6 +48,17 @@ class McpToolAccessAspectTest {
     void allowsCreateTenantEvenWhenUnlinked() throws Throwable {
         authenticateAs(null);
         ProceedingJoinPoint joinPoint = joinPointFor("createTenantStub");
+        when(joinPoint.proceed()).thenReturn("ok");
+
+        Object result = aspect.gateToolAccess(joinPoint);
+
+        assertThat(result).isEqualTo("ok");
+    }
+
+    @Test
+    void allowsSwitchTenantEvenWhenUnlinked() throws Throwable {
+        authenticateAs(null);
+        ProceedingJoinPoint joinPoint = joinPointFor("switchTenantStub");
         when(joinPoint.proceed()).thenReturn("ok");
 
         Object result = aspect.gateToolAccess(joinPoint);
@@ -73,7 +87,7 @@ class McpToolAccessAspectTest {
 
     private void authenticateAs(UUID tenantId) {
         McpUserPrincipal principal =
-                new McpUserPrincipal(UUID.randomUUID(), "alice", "hash", tenantId);
+                new McpUserPrincipal(UUID.randomUUID(), "alice", "hash", tenantId, null);
         SecurityContextHolder.getContext()
                 .setAuthentication(
                         new UsernamePasswordAuthenticationToken(

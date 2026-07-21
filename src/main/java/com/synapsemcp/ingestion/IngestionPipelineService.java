@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -180,12 +181,50 @@ public class IngestionPipelineService {
                             knowledgeBase.getEmbeddingDim());
 
             markStage(job, STAGE_INDEX);
+            if (!knowledgeBaseRepository.existsById(knowledgeBaseId)) {
+                // Architect-level validation round (rag_plan.md Grooming #87): the knowledge_base
+                // (and everything cascading from it - this document, job, chunks) was deleted by a
+                // concurrent request in the window between persist() committing above and this
+                // check - confirmed live, not guessed. Skip the Lucene write entirely rather than
+                // orphan a fresh index directory for a knowledge_base that no longer exists
+                // anywhere in Postgres - IngestionReconciliationJob could never find or clean it
+                // up afterward, since that sweep only iterates
+                // knowledgeBaseRepository.findAll(). Nothing left to mark READY or FAILED either -
+                // the job/document rows are already gone too, so returning here (not falling
+                // through to markReady, and not routing through the catch block below, which
+                // would attempt the identical now-impossible markFailed write) is correct.
+                log.warn(
+                        "knowledge_base {} was deleted while ingestion job {} was in flight -"
+                                + " dropping the pending Lucene write rather than orphaning it",
+                        knowledgeBaseId,
+                        jobId);
+                return;
+            }
             if (!persistResult.replacedChunkIds().isEmpty()) {
                 luceneIndexManager.deleteChunks(knowledgeBaseId, persistResult.replacedChunkIds());
             }
             luceneIndexManager.indexChunks(knowledgeBaseId, persistResult.chunks());
 
             markReady(job, document);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            // Architect-level validation round (rag_plan.md Grooming #88): the job/document (and
+            // everything cascading from its knowledge_base) was concurrently deleted mid-pipeline -
+            // found live, not guessed, via Hibernate's own stale-row detection on a detached-entity
+            // merge (thrown from whichever markStage/markReady call ran next, well before the
+            // Grooming #87 existsById guard ever gets a chance to run for most realistic race
+            // windows - this exception is the real, primary safety net for every stage-transition
+            // write in this pipeline, not just the one explicit check). There is nothing left to
+            // mark FAILED either - markFailed's own save calls would throw this identical
+            // exception trying to update the same already-gone row, which is exactly what used to
+            // happen here (escaping this @Async method uncaught, masked behind Spring's generic
+            // SimpleAsyncUncaughtExceptionHandler log line instead of this pipeline's own
+            // intentional failure message, and never reaching ingestionMetrics.recordFailure at
+            // all). Deliberately a separate catch clause from the one below, logging cleanly and
+            // returning instead.
+            log.warn(
+                    "ingestion job {} was concurrently deleted mid-pipeline (its knowledge_base"
+                            + " was removed while this job was in flight) - abandoning cleanly",
+                    jobId);
         } catch (IOException | RuntimeException e) {
             log.error("ingestion job {} failed at stage {}", jobId, job.getStage(), e);
             markFailed(job, document, e);

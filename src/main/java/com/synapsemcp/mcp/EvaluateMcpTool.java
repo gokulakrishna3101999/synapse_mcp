@@ -22,9 +22,13 @@ import org.springframework.stereotype.Component;
 public class EvaluateMcpTool {
 
     private final EvaluationService evaluationService;
+    private final KnowledgeBaseNameResolver knowledgeBaseNameResolver;
 
-    public EvaluateMcpTool(EvaluationService evaluationService) {
+    public EvaluateMcpTool(
+            EvaluationService evaluationService,
+            KnowledgeBaseNameResolver knowledgeBaseNameResolver) {
         this.evaluationService = evaluationService;
+        this.knowledgeBaseNameResolver = knowledgeBaseNameResolver;
     }
 
     @McpTool(
@@ -34,8 +38,13 @@ public class EvaluateMcpTool {
                             + "knowledge base and returns precision/recall/reciprocal-rank metrics "
                             + "per query and averaged.")
     public EvaluateResponse evaluate(
-            @McpToolParam(description = "Id of the knowledge base to evaluate")
-                    String knowledgeBaseId,
+            @McpToolParam(
+                            description =
+                                    "Name of the knowledge base to evaluate - if omitted, uses"
+                                            + " this account's active knowledge base (see"
+                                            + " switch_knowledge_base)",
+                            required = false)
+                    String knowledgeBaseName,
             @McpToolParam(
                             description =
                                     "Golden queries, each with a query string and its list of "
@@ -54,7 +63,7 @@ public class EvaluateMcpTool {
                             description = "Whether to rerank results with an LLM (default true)",
                             required = false)
                     Boolean rerank) {
-        UUID id = McpToolInputs.parseUuid(knowledgeBaseId, "knowledgeBaseId");
+        UUID id = knowledgeBaseNameResolver.resolve(knowledgeBaseName);
         SearchMode searchMode = McpToolInputs.parseSearchMode(mode);
         EvaluateRequest request = new EvaluateRequest(queries, topK, searchMode, rerank);
         return evaluationService.evaluate(TenantContext.get(), id, request);

@@ -91,6 +91,8 @@ class KnowledgeBaseServiceTest {
         when(knowledgeBaseRepository.countByTenant_Id(tenantId)).thenReturn(0L);
         when(knowledgeBaseRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        when(knowledgeBaseRepository.saveAndFlush(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     @Test
@@ -204,6 +206,58 @@ class KnowledgeBaseServiceTest {
                                         .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY));
     }
 
+    /**
+     * User-requested (2026-07-22): a duplicate name within the same tenant must be rejected with a
+     * clean, code-level error rather than relying solely on the database's own unique constraint.
+     */
+    @Test
+    void throws409WhenCreatingAKnowledgeBaseWithANameAlreadyUsedInTheTenant() {
+        KnowledgeBase existing = mock(KnowledgeBase.class);
+        when(existing.getId()).thenReturn(UUID.randomUUID());
+        when(knowledgeBaseRepository.findByNameIgnoreCaseAndTenant_Id("duplicate-name", tenantId))
+                .thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(
+                        () ->
+                                service.createKnowledgeBase(
+                                        tenantId, new CreateKnowledgeBaseRequest("duplicate-name")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(
+                        e ->
+                                assertThat(((ApiException) e).getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT))
+                .hasMessageContaining("duplicate-name");
+        org.mockito.Mockito.verify(knowledgeBaseRepository, org.mockito.Mockito.never())
+                .saveAndFlush(any());
+    }
+
+    /**
+     * Concurrency backstop: two concurrent creates could both pass the code-level pre-check before
+     * either commits (the same TOCTOU shape as Grooming #29's {@code switch_knowledge_base}
+     * finding) - the database's own unique constraint is the only thing that can never be raced
+     * past, so a constraint violation surfacing from {@code saveAndFlush} must still be translated
+     * into the identical clean error, not leaked raw.
+     */
+    @Test
+    void translatesAConstraintViolationOnCreateIntoACleanConflict() {
+        when(knowledgeBaseRepository.saveAndFlush(any()))
+                .thenThrow(
+                        new org.springframework.dao.DataIntegrityViolationException(
+                                "duplicate key value violates unique constraint"));
+
+        assertThatThrownBy(
+                        () ->
+                                service.createKnowledgeBase(
+                                        tenantId, new CreateKnowledgeBaseRequest("kb-1")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(
+                        e ->
+                                assertThat(((ApiException) e).getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT))
+                .hasMessageContaining("kb-1")
+                .hasMessageNotContainingAny("constraint", "DataIntegrityViolation", "SQLException");
+    }
+
     @Test
     void locksTheTenantRowBeforeCountingExistingKnowledgeBases() {
         service.createKnowledgeBase(tenantId, new CreateKnowledgeBaseRequest("kb-1"));
@@ -297,6 +351,85 @@ class KnowledgeBaseServiceTest {
                         tenantId, kbId, new UpdateKnowledgeBaseRequest("  padded-new-name  "));
 
         assertThat(response.name()).isEqualTo("padded-new-name");
+    }
+
+    /**
+     * User-requested (2026-07-22): renaming to a name already used by a different knowledge base in
+     * the same tenant must be rejected identically to the create-time check.
+     */
+    @Test
+    void throws409WhenRenamingToANameAlreadyUsedByAnotherKnowledgeBaseInTheTenant() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.create(tenant, "old-name", 1536);
+        KnowledgeBase otherKb = mock(KnowledgeBase.class);
+        when(otherKb.getId()).thenReturn(UUID.randomUUID());
+        when(knowledgeBaseRepository.findByIdAndTenant_Id(kbId, tenantId))
+                .thenReturn(Optional.of(kb));
+        when(knowledgeBaseRepository.findByNameIgnoreCaseAndTenant_Id("taken-name", tenantId))
+                .thenReturn(Optional.of(otherKb));
+
+        assertThatThrownBy(
+                        () ->
+                                service.updateKnowledgeBase(
+                                        tenantId,
+                                        kbId,
+                                        new UpdateKnowledgeBaseRequest("taken-name")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(
+                        e ->
+                                assertThat(((ApiException) e).getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT))
+                .hasMessageContaining("taken-name");
+    }
+
+    /**
+     * Renaming a knowledge base to its own current name (e.g. a case-only change, or no change at
+     * all) must not be rejected as a conflict with itself.
+     */
+    @Test
+    void renamingAKnowledgeBaseToItsOwnCurrentNameIsNotTreatedAsAConflict() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.create(tenant, "same-name", 1536);
+        org.springframework.test.util.ReflectionTestUtils.setField(kb, "id", kbId);
+        when(knowledgeBaseRepository.findByIdAndTenant_Id(kbId, tenantId))
+                .thenReturn(Optional.of(kb));
+        when(knowledgeBaseRepository.findByNameIgnoreCaseAndTenant_Id("same-name", tenantId))
+                .thenReturn(Optional.of(kb));
+
+        KnowledgeBaseResponse response =
+                service.updateKnowledgeBase(
+                        tenantId, kbId, new UpdateKnowledgeBaseRequest("same-name"));
+
+        assertThat(response.name()).isEqualTo("same-name");
+    }
+
+    /**
+     * Concurrency backstop for rename: unlike create, {@code updateKnowledgeBase} holds no
+     * per-tenant lock, so a rename can race a concurrent create or another concurrent rename - the
+     * database's own unique constraint is the only thing that can never be raced past.
+     */
+    @Test
+    void translatesAConstraintViolationOnRenameIntoACleanConflict() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.create(tenant, "old-name", 1536);
+        when(knowledgeBaseRepository.findByIdAndTenant_Id(kbId, tenantId))
+                .thenReturn(Optional.of(kb));
+        when(knowledgeBaseRepository.saveAndFlush(any()))
+                .thenThrow(
+                        new org.springframework.dao.DataIntegrityViolationException(
+                                "duplicate key value violates unique constraint"));
+
+        assertThatThrownBy(
+                        () ->
+                                service.updateKnowledgeBase(
+                                        tenantId, kbId, new UpdateKnowledgeBaseRequest("new-name")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(
+                        e ->
+                                assertThat(((ApiException) e).getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT))
+                .hasMessageContaining("new-name")
+                .hasMessageNotContainingAny("constraint", "DataIntegrityViolation", "SQLException");
     }
 
     @Test

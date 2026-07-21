@@ -24,14 +24,17 @@ public class McpTenantLinkingService {
     private final TenantService tenantService;
     private final TenantRepository tenantRepository;
     private final McpUserRepository mcpUserRepository;
+    private final McpUserTenantLinkRepository linkRepository;
 
     McpTenantLinkingService(
             TenantService tenantService,
             TenantRepository tenantRepository,
-            McpUserRepository mcpUserRepository) {
+            McpUserRepository mcpUserRepository,
+            McpUserTenantLinkRepository linkRepository) {
         this.tenantService = tenantService;
         this.tenantRepository = tenantRepository;
         this.mcpUserRepository = mcpUserRepository;
+        this.linkRepository = linkRepository;
     }
 
     @Transactional
@@ -42,6 +45,9 @@ public class McpTenantLinkingService {
         if (updated == 0) {
             throw new McpToolAccessDeniedException("This account is already linked to a tenant.");
         }
+        // Always this account's first entry: linkTenantIfUnlinked's own IS NULL guard means
+        // create_tenant can only ever succeed once per account (mcp_plan.md Grooming #26).
+        linkRepository.save(new McpUserTenantLink(mcpUserId, response.tenantId()));
         return response;
     }
 }
