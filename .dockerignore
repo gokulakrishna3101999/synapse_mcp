@@ -1,0 +1,13 @@
+.git/
+.idea/
+.vscode/
+
+target/
+plan/
+implementation/
+
+.gitignore
+.DS_Store
+.dockerignore
+
+Dockerfile

@@ -2,7 +2,7 @@ spring:
   application:
     name: synapse_mcp
   profiles:
-    default: local
+    default: ${ENVIRONMENT:local}
   ai:
     mcp:
       server:
