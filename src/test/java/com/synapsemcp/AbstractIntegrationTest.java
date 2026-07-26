@@ -16,8 +16,10 @@ import org.springframework.test.context.ActiveProfiles;
  * gets a genuinely fresh schema) - no ephemeral containers, no Docker (plan.md §9, rag_plan.md
  * Stage 0). Requires native Postgres already running with {@code DB_URL}/{@code DB_USERNAME}/{@code
  * DB_PASSWORD} exported and the {@code synapsemcp_test} database + {@code vector} extension already
- * created (bootstrap runners are {@code local}/{@code dev}-only, rag_plan.md Stage 0.5 Grooming
- * #18).
+ * created externally (no in-app bootstrap runner does this anymore, rag_plan.md Stage 0.5) - {@code
+ * scripts/init-environment.sh} handles this. The supplemental schema ({@code schema.sql} - HNSW
+ * indexes/CHECK constraints/unique index) is still applied automatically by the app itself on every
+ * fresh {@code create-drop} schema, via Spring Boot's deferred SQL initialization.
  *
  * <p>Also deletes every {@code synapsemcp_test:*}-prefixed Redis key before every test method: the
  * app and the test suite share one Redis database (index 0), isolated by key prefix rather than by

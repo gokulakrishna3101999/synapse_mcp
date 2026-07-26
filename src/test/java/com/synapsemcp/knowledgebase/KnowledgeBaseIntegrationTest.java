@@ -204,9 +204,8 @@ class KnowledgeBaseIntegrationTest extends AbstractIntegrationTest {
     /**
      * Confirmed via `AskUserQuestion` (`plan.md` §9, 2026-07-17): case-variant names are treated as
      * duplicates, not distinct knowledge bases, enforced by a case-insensitive functional unique
-     * index ({@code uq_knowledge_bases_tenant_name_ci}, {@link
-     * com.synapsemcp.config.AnnIndexBootstrapRunner}) rather than the plain JPA-level constraint
-     * this replaced.
+     * index ({@code uq_knowledge_bases_tenant_name_ci}, applied via {@code schema.sql}) rather than
+     * the plain JPA-level constraint this replaced.
      */
     @Test
     void caseVariantNameWithinTheSameTenantReturns409() {

@@ -167,7 +167,7 @@ case "$PROFILE_CHOICE" in
 esac
 info "Profile: $PROFILE"
 if [ "$PROFILE" != "local" ] && [ "$PROFILE" != "dev" ]; then
-  fail "This wizard only supports local/dev (prod's bootstrap runners are disabled by design and its schema/role must already be provisioned manually - see rag_plan.md Stage 0.5)."
+  fail "This wizard only supports local/dev (prod has no in-app schema provisioning by design - its database/role/schema must already be provisioned via the CI/CD database-initialization pipeline stage - see rag_plan.md Stage 0.5)."
 fi
 
 DB_URL=$(ask "DB_URL (JDBC base URL, no database name)" "jdbc:postgresql://localhost:5432")
@@ -310,9 +310,9 @@ PGPASSWORD="$DB_PASSWORD" createdb -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME"
 PGPASSWORD="$DB_PASSWORD" createdb -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -O "$DB_USERNAME" synapsemcp_test \
   || fail "Failed to create 'synapsemcp_test'."
 CLEANUP_DONE=true
-# rag_plan.md Stage 0.5: DatabaseBootstrapRunner (which would normally do this) is local/dev-only
-# and never runs for the `test` profile - synapsemcp_test's vector extension must already exist
-# before the app/test-suite ever connects to it, so this script creates it explicitly for both.
+# rag_plan.md Stage 0.5: no in-app bootstrap runner exists anymore - synapsemcp_test's vector
+# extension must already exist before the app/test-suite ever connects to it, so this script
+# creates it explicitly for both databases.
 PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d synapsemcp -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null \
   || fail "Failed to enable pgvector on 'synapsemcp'."
 PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d synapsemcp_test -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null \
@@ -365,10 +365,24 @@ if [ "$HEALTHY" != true ]; then
 fi
 success "Application is UP (confirms Postgres connectivity - the DataSource health indicator)."
 
-if grep -q "ANN indexes and CHECK constraints verified" "$APP_LOG"; then
-  success "Schema + pgvector HNSW indexes verified by the app's own startup bootstrap."
+# No in-app bootstrap runner exists anymore - schema.sql (HNSW indexes/CHECK constraints/unique
+# index) is applied by Spring Boot's own deferred SQL init in local/dev/test, but there's no log
+# line to grep for it. Verify directly against the database instead - this wizard always targets
+# the "synapsemcp" database regardless of profile (local/dev share it, see Step 1).
+info "Verifying schema.sql's supplemental DDL against 'synapsemcp'..."
+SCHEMA_CHECK=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d synapsemcp -tAc "
+  SELECT
+    (SELECT count(*) FROM pg_indexes WHERE indexname IN
+      ('idx_chunks_emb_384','idx_chunks_emb_512','idx_chunks_emb_768',
+       'idx_chunks_emb_1024','idx_chunks_emb_1536','idx_chunks_emb_3072')) = 6
+    AND (SELECT count(*) FROM pg_constraint WHERE conname IN
+      ('chk_model_configs_chat_provider','chk_model_configs_embedding_provider')) = 2
+    AND (SELECT count(*) FROM pg_indexes WHERE indexname = 'uq_knowledge_bases_tenant_name_ci') = 1
+" 2>/dev/null || echo "f")
+if [ "$SCHEMA_CHECK" = "t" ]; then
+  success "Schema + pgvector HNSW indexes verified (6 HNSW indexes, 2 CHECK constraints, 1 unique index)."
 else
-  fail "Did not find the expected ANN/pgvector bootstrap confirmation in the app log - schema may not be ready."
+  fail "schema.sql's supplemental DDL (HNSW indexes/CHECK constraints/unique index) is missing or incomplete on 'synapsemcp' - schema may not be ready."
 fi
 
 info "Re-checking Redis connectivity now that the app is running..."

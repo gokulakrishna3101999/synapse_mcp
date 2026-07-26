@@ -280,9 +280,9 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "Failed to create 'synapsemcp_test'." }
     $script:CleanupDone = $true
 
-    # rag_plan.md Stage 0.5: DatabaseBootstrapRunner (which would normally do this) is local/dev-only
-    # and never runs for the `test` profile - synapsemcp_test's vector extension must already exist
-    # before the app/test-suite ever connects to it, so this script creates it explicitly for both.
+    # rag_plan.md Stage 0.5: no in-app bootstrap runner exists anymore - synapsemcp_test's vector
+    # extension must already exist before the app/test-suite ever connects to it, so this script
+    # creates it explicitly for both databases.
     & psql -h $DbHost -p $DbPort -U $DbUsername -d synapsemcp -c "CREATE EXTENSION IF NOT EXISTS vector;" | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "Failed to enable pgvector on 'synapsemcp'." }
     & psql -h $DbHost -p $DbPort -U $DbUsername -d synapsemcp_test -c "CREATE EXTENSION IF NOT EXISTS vector;" | Out-Null
@@ -343,11 +343,25 @@ try {
     }
     Write-Success "Application is UP (confirms Postgres connectivity - the DataSource health indicator)."
 
-    $logContent = if (Test-Path $AppLog) { Get-Content $AppLog -Raw } else { "" }
-    if ($logContent -match "ANN indexes and CHECK constraints verified") {
-        Write-Success "Schema + pgvector HNSW indexes verified by the app's own startup bootstrap."
+    # No in-app bootstrap runner exists anymore - schema.sql (HNSW indexes/CHECK constraints/unique
+    # index) is applied by Spring Boot's own deferred SQL init in local/dev/test, but there's no log
+    # line to grep for it. Verify directly against the database instead - this wizard always targets
+    # the "synapsemcp" database regardless of profile (local/dev share it, see Step 1).
+    Write-Info "Verifying schema.sql's supplemental DDL against 'synapsemcp'..."
+    $schemaCheckSql = @"
+SELECT
+  (SELECT count(*) FROM pg_indexes WHERE indexname IN
+    ('idx_chunks_emb_384','idx_chunks_emb_512','idx_chunks_emb_768',
+     'idx_chunks_emb_1024','idx_chunks_emb_1536','idx_chunks_emb_3072')) = 6
+  AND (SELECT count(*) FROM pg_constraint WHERE conname IN
+    ('chk_model_configs_chat_provider','chk_model_configs_embedding_provider')) = 2
+  AND (SELECT count(*) FROM pg_indexes WHERE indexname = 'uq_knowledge_bases_tenant_name_ci') = 1
+"@
+    $schemaCheck = (& psql -h $DbHost -p $DbPort -U $DbUsername -d synapsemcp -tAc $schemaCheckSql 2>$null | Out-String).Trim()
+    if ($schemaCheck -eq "t") {
+        Write-Success "Schema + pgvector HNSW indexes verified (6 HNSW indexes, 2 CHECK constraints, 1 unique index)."
     } else {
-        Fail "Did not find the expected ANN/pgvector bootstrap confirmation in the app log - schema may not be ready."
+        Fail "schema.sql's supplemental DDL (HNSW indexes/CHECK constraints/unique index) is missing or incomplete on 'synapsemcp' - schema may not be ready."
     }
 
     Write-Info "Re-checking Redis connectivity now that the app is running..."

@@ -1,38 +1,27 @@
-# Same DB_URL/DB_USERNAME/DB_PASSWORD convention as application-local.yaml. Isolated database
-# (synapsemcp_test, not synapsemcp) so *IntegrationTests never touch real dev data - plan.md §9,
-# 2026-07-14. DatabaseBootstrapRunner is local/dev-only (Grooming #18); synapsemcp_test + the vector
-# extension must already exist before running ./mvnw verify (see scripts/setup-environment.sh).
-# AnnIndexBootstrapRunner (HNSW indexes + model_configs CHECK constraints) DOES run here, unlike
-# DatabaseBootstrapRunner - it only needs the normal app datasource, not elevated bootstrap
-# credentials, and *IntegrationTests need the same schema local/dev/prod have (plan.md §9, 2026-07-16).
-# Redis: same database as the app (index 0, plan.md §9 2026-07-16) - isolation is by key prefix
-# (synapsemcp.redis.key-prefix) instead of by database index; see com.synapsemcp.common.RedisKeyPrefix.
 spring:
   datasource:
     url: ${DB_URL}/synapsemcp_test
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     hikari:
-      # Same short-timeout rationale as application-local.yaml - see its comment.
       connection-timeout: ${DB_CONNECTION_TIMEOUT:3000}
-      # hnsw.iterative_scan = relaxed_order (pgvector 0.8+) - see application-local.yaml's comment.
-      connection-init-sql: SET lock_timeout = '${DB_LOCK_TIMEOUT:3s}'; SET hnsw.iterative_scan = relaxed_order
+      connection-init-sql: SET lock_timeout = '${DB_LOCK_TIMEOUT:5s}'; SET hnsw.iterative_scan = relaxed_order
   jpa:
     hibernate:
       ddl-auto: create-drop
+    defer-datasource-initialization: true
     open-in-view: false
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      # Same short-timeout rationale as application-local.yaml - see its comment.
-      connect-timeout: ${REDIS_CONNECT_TIMEOUT:1s}
-      timeout: ${REDIS_TIMEOUT:1s}
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:5s}
+      timeout: ${REDIS_TIMEOUT:5s}
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:migration/schema.sql
 
 synapsemcp:
-  bootstrap:
-    enabled: false
-  ann-bootstrap:
-    enabled: true
   redis:
     key-prefix: synapsemcp_test
