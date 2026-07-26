@@ -46,7 +46,7 @@ SynapseMCP is a multi-tenant document intelligence platform. Tenants upload docu
 | Cache / Rate Limit | Redis | Embedding cache (7-day TTL), OCR cache (24-hour TTL), per-tenant rate limits |
 | Async Processing | Spring `@Async` + `ThreadPoolTaskExecutor` | Consider virtual-thread executor |
 | MCP | Official MCP Java SDK | Phase 2 |
-| Schema Management | Hibernate `ddl-auto` | Schema create/update controlled entirely by `spring.jpa.hibernate.ddl-auto`, generated from JPA `@Entity` classes — no Flyway, no migration files (see `rag_plan.md` Stage 0.5) |
+| Schema Management | Hibernate `ddl-auto` + `schema.sql` | Base tables/columns generated from JPA `@Entity` classes via `spring.jpa.hibernate.ddl-auto` (no Flyway, no versioned migration files); the HNSW indexes/CHECK constraints/unique index plain JPA can't express are supplied by `src/main/resources/migration/schema.sql`, applied automatically in every profile via Spring Boot's deferred SQL init (see `rag_plan.md` Stage 0.5, Groomings #90/#91, and `resource.md`) |
 | Build | Maven (wrapper `./mvnw` committed) | Java 21+ toolchain |
 | Containerization | Docker / Podman | Multi-stage builds |
 | Orchestration | Kubernetes | Helm chart or Kustomize |
@@ -76,14 +76,14 @@ Text extraction strategy: **format-dependent**. Text-oriented formats (plain tex
 ### Prerequisites
 
 - Java 21+ (LTS), Git. **No Docker anywhere** — not for running the app, not for the test suite
-- Native Postgres 17 **server** + Redis must be running before `./mvnw verify` (`*IntegrationTest`s run against them directly) — see Commands below. The app itself creates its own role/database/`vector` extension and schema (tables/columns/indexes) at startup (`rag_plan.md` Stage 0.5); you no longer need to pre-create the `synapsemcp` database by hand for local/dev use
+- Native Postgres 17 **server** + Redis must be running before `./mvnw verify` (`*IntegrationTest`s run against them directly) — see Commands below. Unlike earlier in this project, the app no longer creates its own role/database/`vector` extension — those must already exist externally (`scripts/init-environment.sh`/`.ps1` locally, Terraform for AWS, `rag_plan.md` Stage 0.5 Groomings #90/#91, `resource.md`) before the app starts; the app itself still creates/evolves the tables/columns/indexes (Hibernate `ddl-auto` + `schema.sql`) in every profile
 - No global Maven required — use the committed wrapper `./mvnw`
 
 ### Commands
 
 | Purpose | Command |
 |---|---|
-| Start local dependencies (native Postgres server + Redis) | `brew services start postgresql@17 redis@6.2` (or `./scripts/setup-environment.sh` — also installs the services if missing and, when run, destructively drops/recreates the `synapsemcp`/`synapsemcp_test` databases and flushes Redis for a clean slate — see §9 Decision Log). Role, database, `vector` extension, and schema are otherwise created automatically by the app itself at next startup — the script is an optional clean-slate/first-install convenience, not a prerequisite |
+| Start local dependencies (native Postgres server + Redis) | `brew services start postgresql@17 redis@6.2`, then `./scripts/init-environment.sh`/`.ps1` — the wizard that creates/resets the `synapsemcp`/`synapsemcp_test` databases and enables `vector` on both (destructively, with confirmation — see §9 Decision Log and `resource.md`). This step is now a genuine **prerequisite**, not just a convenience: the app itself no longer creates the database/role/`vector` extension (Groomings #90/#91) — it only creates/evolves the tables/columns/indexes once those already exist |
 | Stop local dependencies | `brew services stop postgresql@17 redis@6.2` |
 | Full build + all tests (the gate for checking off tasks) — needs native Postgres/Redis already running | `./mvnw clean verify` |
 | Unit tests only | `./mvnw test` |
@@ -95,12 +95,12 @@ Text extraction strategy: **format-dependent**. Text-oriented formats (plain tex
 ### Testing setup
 
 - **Unit tests** (`*Test`): no external dependencies, run in plain JVM
-- **Integration tests** (`*IntegrationTest`): run against a real, **isolated** `synapsemcp_test` Postgres database (`application-test.yaml`, `AbstractIntegrationTest`) — not the same database the app itself uses (`synapsemcp`); Redis is the **same database (index 0)** as the app, isolated instead by key prefix (`synapsemcp:*` app, `synapsemcp_test:*` tests — `com.synapsemcp.common.RedisKeyPrefix`, since 2026-07-16 §9 Decision Log, superseding the earlier index-1 approach); no ephemeral containers, no Docker, no data synced between the two; start native services first (`scripts/setup-environment.sh` or `brew services start`)
-- Schema is created/updated automatically by Hibernate `ddl-auto` on every startup, from the app's JPA `@Entity` classes — no versioned migration files to write or maintain. `local`/`dev` use `update` (schema evolves as entities change); `test` uses `create-drop` (every `*IntegrationTest` run gets a genuinely fresh schema); `prod` uses `validate` (Hibernate never mutates a production schema automatically — see `rag_plan.md` Stage 0.5)
+- **Integration tests** (`*IntegrationTest`): run against a real, **isolated** `synapsemcp_test` Postgres database (`application-test.yaml`, `AbstractIntegrationTest`) — not the same database the app itself uses (`synapsemcp`); Redis is the **same database (index 0)** as the app, isolated instead by key prefix (`synapsemcp:*` app, `synapsemcp_test:*` tests — `com.synapsemcp.common.RedisKeyPrefix`, since 2026-07-16 §9 Decision Log, superseding the earlier index-1 approach); no ephemeral containers, no Docker, no data synced between the two; start native services first (`scripts/init-environment.sh`/`.ps1` or `brew services start`)
+- Schema is created/updated automatically by Hibernate `ddl-auto` on every startup, from the app's JPA `@Entity` classes — no versioned migration files to write or maintain. `local`/`dev`/`prod` all use `update` (schema evolves as entities change, identically in every profile — Grooming #91, see `resource.md` §6); `test` uses `create-drop` (every `*IntegrationTest` run gets a genuinely fresh schema, only ever against the isolated `synapsemcp_test` database). The HNSW indexes/CHECK constraints/unique index plain JPA can't express are supplied separately by `src/main/resources/migration/schema.sql`, applied automatically in every profile too (`rag_plan.md` Stage 0.5)
 
 ### Manual PostgreSQL Setup (native install)
 
-> Local dev runs on a **natively installed** PostgreSQL 17 + `pgvector` + Redis (no Docker involved in running the app — see `CLAUDE.md`'s Commands section). In `local`/`dev` profiles, the app itself creates its role, database, `vector` extension, ANN indexes, and schema automatically at startup (`DatabaseBootstrapRunner`/`AnnIndexBootstrapRunner` + Hibernate `ddl-auto`, `rag_plan.md` Stage 0.5) — **you only need to install and start the Postgres server itself**, not run any setup SQL by hand. `./scripts/setup-environment.sh`/`.ps1` remain available as an install-and-start convenience (Homebrew/apt) and for a **destructive** clean-slate reset of `synapsemcp`/`synapsemcp_test` (dropped and recreated empty, Redis flushed across all DB indexes — a dev-reset tool, not a preserve-my-data one) when you want to start from scratch; the app recreates everything it needs on its next startup either way. This manual guide is the step-by-step equivalent of what the app's bootstrap runner does, useful for troubleshooting, `prod` provisioning (where the bootstrap runners are disabled — `ddl-auto: validate`, see `rag_plan.md` Stage 0.5), or a from-scratch install without the script.
+> Local dev runs on a **natively installed** PostgreSQL 17 + `pgvector` + Redis (no Docker involved in running the app — see `CLAUDE.md`'s Commands section). **No in-app bootstrap runner exists anymore** (`DatabaseBootstrapRunner`/`AnnIndexBootstrapRunner`, removed — `rag_plan.md` Stage 0.5, Groomings #90/#91): the role, database, and `vector` extension must be provisioned externally, in every profile — `./scripts/init-environment.sh`/`.ps1` does this for local/dev (install-and-start convenience via Homebrew/apt, plus a **destructive** clean-slate reset of `synapsemcp`/`synapsemcp_test` when you want to start from scratch), Terraform does the equivalent for AWS (Phase 3, not yet built). Once that's done, the app itself creates/evolves the tables/columns and the HNSW indexes/CHECK constraints/unique index at every startup (Hibernate `ddl-auto` + `schema.sql`, identically in `local`/`dev`/`prod` — see `resource.md`). This manual guide is the step-by-step equivalent of what `init-environment.sh`/Terraform automates — useful for troubleshooting or a from-scratch install without either.
 
 **Step 1: Log into PostgreSQL (OS-specific)**
 
@@ -110,7 +110,7 @@ Text extraction strategy: **format-dependent**. Text-oriented formats (plain tex
 
 **Step 2: Execute the setup commands**
 
-Once at the `postgres=#` prompt (skip this step entirely for `local`/`dev` — the app's bootstrap runner does this for you on startup; use it for `prod` or manual troubleshooting):
+Once at the `postgres=#` prompt (skip this step entirely if you ran `./scripts/init-environment.sh`/`.ps1` already — it does this for you, for `local`/`dev`; use this manual sequence for `prod`/AWS provisioning that hasn't been automated via Terraform yet, or for troubleshooting):
 
 ```sql
 -- 1. Create the application user
@@ -138,7 +138,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 \q
 ```
 
-> `SUPERUSER` is used here for local-dev convenience only — do not carry this into `dev`/`prod` profiles or shared environments; those should use a least-privilege role scoped to the `synapsemcp` database. Table/column/index schema itself (the equivalent of what used to be a Flyway `V1__init_schema.sql`) is **not** part of this manual step — it's generated by Hibernate `ddl-auto` from the app's `@Entity` classes the first time the app connects (`update` in `local`/`dev`), or must already match those entities before startup in `prod` (`validate`).
+> `SUPERUSER` is used here for local-dev convenience only — do not carry this into `dev`/`prod` profiles or shared environments; those should use a least-privilege role scoped to the `synapsemcp` database. Table/column/index schema itself (the equivalent of what used to be a Flyway `V1__init_schema.sql`) is **not** part of this manual step — it's generated by Hibernate `ddl-auto` from the app's `@Entity` classes the first time the app connects, identically in `local`/`dev`/`prod` (all `update`, Grooming #91 — see `resource.md` §6); the HNSW indexes/CHECK constraints/unique index are supplied the same way in every profile too, by `schema.sql`.
 
 ---
 
@@ -213,9 +213,19 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 ## Phase 1 — Core RAG Application
 
-> **Note:** The detailed plan, schema definitions, and task checkboxes for the core RAG platform have been moved to a dedicated sub-plan.
-> 
-> 👉 **See [`rag_plan.md`](./rag_plan.md) for the authoritative Phase 1 tasks, DB schema, and architectural decisions.**
+> **Note:** The detailed plan, schema definitions, and task checkboxes for the core RAG platform have been moved to dedicated sub-plans.
+>
+> 👉 **See [`rag_plan.md`](./rag_plan.md) for the authoritative Phase 1 tasks, DB schema, and architectural decisions** (stage-by-stage design, ~91 numbered grooming decisions).
+>
+> 👉 **See [`resource.md`](./resource.md) for the current-state resource reference** — every table/entity, the `vector` extension, the 6 sparse embedding columns, the 6 HNSW indexes/2 CHECK constraints/1 unique index supplied by `schema.sql`, and exactly how each is configured per Spring profile (`local`/`dev`/`test`/`prod`) and consumed at runtime.
+
+**Status** (see `implementation/memory.md` for full session-by-session detail): essentially complete
+and heavily audited across many validation rounds. No in-app schema-bootstrap runners exist anymore
+(`DatabaseBootstrapRunner`/`AnnIndexBootstrapRunner`, removed — Grooming #90) — the database and
+`vector` extension are provisioned externally in every profile (`scripts/init-environment.sh`/`.ps1`
+locally, Terraform planned for AWS/Phase 3), while table creation and the supplemental
+`schema.sql` DDL are handled by the app itself, identically in `local`/`dev`/`test`/`prod`
+(Grooming #91) — see `resource.md` for the full breakdown.
 
 ---
 

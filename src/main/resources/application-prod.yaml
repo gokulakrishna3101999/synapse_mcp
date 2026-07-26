@@ -8,7 +8,13 @@ spring:
       connection-init-sql: SET lock_timeout = '${DB_LOCK_TIMEOUT:5s}'; SET hnsw.iterative_scan = relaxed_order
   jpa:
     hibernate:
-      ddl-auto: validate
+      # Path A (Grooming #91, supersedes Grooming #90's original prod approach): the app itself
+      # creates/evolves tables on every startup, same as local/dev - the database and the vector
+      # extension must still already exist externally (Terraform), but table creation and the
+      # schema.sql supplemental DDL below are now both handled by the app, not a separate CI/CD
+      # DB-init pipeline stage.
+      ddl-auto: update
+    defer-datasource-initialization: true
     open-in-view: false
   data:
     redis:
@@ -18,7 +24,8 @@ spring:
       timeout: ${REDIS_TIMEOUT:5s}
   sql:
     init:
-      mode: never
+      mode: always
+      schema-locations: classpath:migration/schema.sql
 
 synapsemcp:
   redis:
